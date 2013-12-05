@@ -1277,7 +1277,8 @@ endif
 if HAVE_JACK
 modlibexec_LTLIBRARIES += \
 		module-jack-sink.la \
-		module-jack-source.la
+		module-jack-source.la \
+		module-jack.la
 
 if HAVE_DBUS
 modlibexec_LTLIBRARIES += \
@@ -1412,6 +1413,7 @@ SYMDEF_FILES = \
 		module-jackdbus-detect-symdef.h \
 		module-jack-sink-symdef.h \
 		module-jack-source-symdef.h \
+		module-jack-symdef.h \
 		module-volume-restore-symdef.h \
 		module-device-manager-symdef.h \
 		module-device-restore-symdef.h \
@@ -1995,6 +1997,11 @@ module_jack_source_la_SOURCES = modules/jack/module-jack-source.c
 module_jack_source_la_LDFLAGS = $(MODULE_LDFLAGS)
 module_jack_source_la_LIBADD = $(MODULE_LIBADD) $(JACK_LIBS)
 module_jack_source_la_CFLAGS = $(AM_CFLAGS) $(JACK_CFLAGS)
+
+module_jack_la_SOURCES = modules/jack/module-jack.c
+module_jack_la_LDFLAGS = $(MODULE_LDFLAGS)
+module_jack_la_LIBADD = $(MODULE_LIBADD) $(JACK_LIBS)
+module_jack_la_CFLAGS = $(AM_CFLAGS) $(JACK_CFLAGS)
 
 module_hal_detect_la_SOURCES = modules/module-hal-detect-compat.c
 module_hal_detect_la_LIBADD = $(MODULE_LIBADD)
