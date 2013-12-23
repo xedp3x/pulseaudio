@@ -500,7 +500,6 @@ void* init_card(void *arg, const char *name, bool is_sink) {
 
 	pa_log_debug("Jack Ports");
 	/* Jack ports */
-	ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (card->is_sink ? JackPortIsInput : JackPortIsOutput));
 	for (i = 0; i < ss.channels; i++) {
 	        if (!(card->port[i] = jack_port_register(card->jack, pa_channel_position_to_string(base->core->default_channel_map.map[i]), JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
 	            pa_log("jack_port_register() failed.");
@@ -509,8 +508,7 @@ void* init_card(void *arg, const char *name, bool is_sink) {
 	    }
 
 	if (base->autoconnect) {
-		if (ports)
-			jack_free(ports);
+		ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (card->is_sink ? JackPortIsInput : JackPortIsOutput));
 		for (i = 0, p = ports; i < ss.channels; i++, p++) {
 
 			if (!p || !*p) {
@@ -520,7 +518,7 @@ void* init_card(void *arg, const char *name, bool is_sink) {
 
 			pa_log_info("Connecting %s to %s", jack_port_name(card->port[i]), *p);
 
-			if (jack_connect(card->jack, *p, jack_port_name(card->port[i]))) {
+			if (jack_connect(card->jack,(card->is_sink ? jack_port_name(card->port[i]) : *p), (card->is_sink ? *p : jack_port_name(card->port[i])))) {
 				pa_log("Failed to connect %s to %s, leaving unconnected.", jack_port_name(card->port[i]), *p);
 				break;
 			}
@@ -561,7 +559,6 @@ void* init_card(void *arg, const char *name, bool is_sink) {
 
 	fail:
 	pa_log("card_init Fatal 511");
-	abort(); // KILL!!!!
 	if (ports)
 		jack_free(ports);
 	return NULL;
@@ -583,6 +580,7 @@ int pa__init(pa_module*m) {
 		return -1;
 	}
 
+	base->autoconnect = true;
 	if (pa_modargs_get_value_boolean(base->ma, "connect", &(base->autoconnect)) < 0) {
 		pa_log("Failed to parse connect= argument.");
 		pa__done(m);
