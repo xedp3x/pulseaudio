@@ -369,9 +369,9 @@ int pa_modargs_get_sample_rate(pa_modargs *ma, uint32_t *rate) {
 
     pa_assert(rate);
 
+    rate_local = *rate;
     if ((pa_modargs_get_value_u32(ma, "rate", &rate_local)) < 0 ||
-        rate_local <= 0 ||
-        rate_local > PA_RATE_MAX)
+        !pa_sample_rate_valid(rate_local))
         return -1;
 
     *rate = rate_local;
@@ -387,15 +387,12 @@ int pa_modargs_get_sample_spec(pa_modargs *ma, pa_sample_spec *rss) {
     pa_assert(rss);
 
     ss = *rss;
-    if ((pa_modargs_get_value_u32(ma, "rate", &ss.rate)) < 0 ||
-        ss.rate <= 0 ||
-        ss.rate > PA_RATE_MAX)
+    if ((pa_modargs_get_sample_rate(ma, &ss.rate)) < 0)
         return -1;
 
     channels = ss.channels;
     if ((pa_modargs_get_value_u32(ma, "channels", &channels)) < 0 ||
-        channels <= 0 ||
-        channels >= PA_CHANNELS_MAX)
+        !pa_channels_valid(channels))
         return -1;
     ss.channels = (uint8_t) channels;
 
@@ -412,14 +409,16 @@ int pa_modargs_get_sample_spec(pa_modargs *ma, pa_sample_spec *rss) {
 }
 
 int pa_modargs_get_alternate_sample_rate(pa_modargs *ma, uint32_t *alternate_rate) {
-    pa_assert(ma);
+    uint32_t rate_local;
+
     pa_assert(alternate_rate);
 
-    if ((pa_modargs_get_value_u32(ma, "alternate_rate", alternate_rate)) < 0 ||
-        *alternate_rate <= 0 ||
-        *alternate_rate > PA_RATE_MAX ||
-        !((*alternate_rate % 4000 == 0) || (*alternate_rate % 11025 == 0)))
+    rate_local = *alternate_rate;
+    if ((pa_modargs_get_value_u32(ma, "alternate_rate", &rate_local)) < 0 ||
+        !pa_sample_rate_valid(*alternate_rate))
         return -1;
+
+    *alternate_rate = rate_local;
 
     return 0;
 }

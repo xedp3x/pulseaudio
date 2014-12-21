@@ -141,10 +141,14 @@ static pa_hook_result_t sink_input_fixate_hook_cb(pa_core *c, pa_sink_input_new_
 
     /* We need to resume the audio device here even for
      * PA_SINK_INPUT_START_CORKED, since we need the device parameters
-     * to be fully available while the stream is set up. */
+     * to be fully available while the stream is set up. In that case,
+     * make sure we close the sink again after the timeout interval. */
 
-    if ((d = pa_hashmap_get(u->device_infos, data->sink)))
+    if ((d = pa_hashmap_get(u->device_infos, data->sink))) {
         resume(d);
+        if (pa_sink_check_suspend(d->sink) <= 0)
+            restart(d);
+    }
 
     return PA_HOOK_OK;
 }
@@ -161,8 +165,18 @@ static pa_hook_result_t source_output_fixate_hook_cb(pa_core *c, pa_source_outpu
     else
         d = pa_hashmap_get(u->device_infos, data->source);
 
-    if (d)
+    if (d) {
         resume(d);
+        if (d->source) {
+            if (pa_source_check_suspend(d->source) <= 0)
+                restart(d);
+        } else {
+            /* The source output is connected to a monitor source. */
+            pa_assert(d->sink);
+            if (pa_sink_check_suspend(d->sink) <= 0)
+                restart(d);
+        }
+    }
 
     return PA_HOOK_OK;
 }
@@ -382,14 +396,11 @@ static void device_info_free(struct device_info *d) {
 }
 
 static pa_hook_result_t device_unlink_hook_cb(pa_core *c, pa_object *o, struct userdata *u) {
-    struct device_info *d;
-
     pa_assert(c);
     pa_object_assert_ref(o);
     pa_assert(u);
 
-    if ((d = pa_hashmap_remove(u->device_infos, o)))
-        device_info_free(d);
+    pa_hashmap_remove_and_free(u->device_infos, o);
 
     return PA_HOOK_OK;
 }

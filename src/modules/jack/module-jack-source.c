@@ -51,7 +51,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("JACK Source");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(true);
+PA_MODULE_LOAD_ONCE(false);
 PA_MODULE_USAGE(
         "source_name=<name for the source> "
         "source_properties=<properties for the source> "
@@ -198,7 +198,7 @@ static void thread_func(void *userdata) {
     for (;;) {
         int ret;
 
-        if ((ret = pa_rtpoll_run(u->rtpoll, true)) < 0)
+        if ((ret = pa_rtpoll_run(u->rtpoll)) < 0)
             goto fail;
 
         if (ret == 0)
@@ -297,8 +297,7 @@ int pa__init(pa_module*m) {
         channels = m->core->default_sample_spec.channels;
 
     if (pa_modargs_get_value_u32(ma, "channels", &channels) < 0 ||
-        channels <= 0 ||
-        channels >= PA_CHANNELS_MAX) {
+        !pa_channels_valid(channels)) {
         pa_log("failed to parse channels= argument.");
         goto fail;
     }

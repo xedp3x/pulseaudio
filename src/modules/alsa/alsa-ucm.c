@@ -214,7 +214,7 @@ static int ucm_get_device_property(
     value = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_PLAYBACK_CHANNELS);
     if (value) { /* output */
         /* get channels */
-        if (pa_atou(value, &ui) == 0 && ui < PA_CHANNELS_MAX)
+        if (pa_atou(value, &ui) == 0 && pa_channels_valid(ui))
             device->playback_channels = ui;
         else
             pa_log("UCM playback channels %s for device %s out of range", value, device_name);
@@ -234,7 +234,7 @@ static int ucm_get_device_property(
     value = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_CAPTURE_CHANNELS);
     if (value) { /* input */
         /* get channels */
-        if (pa_atou(value, &ui) == 0 && ui < PA_CHANNELS_MAX)
+        if (pa_atou(value, &ui) == 0 && pa_channels_valid(ui))
             device->capture_channels = ui;
         else
             pa_log("UCM capture channels %s for device %s out of range", value, device_name);
@@ -263,7 +263,7 @@ static int ucm_get_device_property(
         /* get rate */
         if ((value = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_PLAYBACK_RATE)) ||
             (value = pa_proplist_gets(verb->proplist, PA_ALSA_PROP_UCM_PLAYBACK_RATE))) {
-            if (pa_atou(value, &ui) == 0 && ui > 0 && ui < PA_RATE_MAX) {
+            if (pa_atou(value, &ui) == 0 && pa_sample_rate_valid(ui)) {
                 pa_log_debug("UCM playback device %s rate %d", device_name, ui);
                 device->playback_rate = ui;
             } else
@@ -284,7 +284,7 @@ static int ucm_get_device_property(
         /* get rate */
         if ((value = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_CAPTURE_RATE)) ||
             (value = pa_proplist_gets(verb->proplist, PA_ALSA_PROP_UCM_CAPTURE_RATE))) {
-            if (pa_atou(value, &ui) == 0 && ui > 0 && ui < PA_RATE_MAX) {
+            if (pa_atou(value, &ui) == 0 && pa_sample_rate_valid(ui)) {
                 pa_log_debug("UCM capture device %s rate %d", device_name, ui);
                 device->capture_rate = ui;
             } else
@@ -1106,8 +1106,7 @@ static void alsa_mapping_add_ucm_modifier(pa_alsa_mapping *m, pa_alsa_ucm_modifi
         m->description = pa_xstrdup(new_desc);
     pa_xfree(cur_desc);
 
-    if (!m->description)
-        pa_xstrdup("");
+    m->description = m->description ? m->description : pa_xstrdup("");
 
     /* Modifier sinks should not be routed to by default */
     m->priority = 0;
@@ -1128,7 +1127,7 @@ static void alsa_mapping_add_ucm_modifier(pa_alsa_mapping *m, pa_alsa_ucm_modifi
         /* FIXME: channel_str is unsanitized input from the UCM configuration,
          * we should do proper error handling instead of asserting.
          * https://bugs.freedesktop.org/show_bug.cgi?id=71823 */
-        pa_assert_se(pa_atou(channel_str, &channels) == 0 && channels < PA_CHANNELS_MAX);
+        pa_assert_se(pa_atou(channel_str, &channels) == 0 && pa_channels_valid(channels));
         pa_log_debug("Got channel count %" PRIu32 " for modifier", channels);
     }
 
@@ -1427,21 +1426,20 @@ static void profile_finalize_probing(pa_alsa_profile *p) {
 static void ucm_mapping_jack_probe(pa_alsa_mapping *m) {
     snd_pcm_t *pcm_handle;
     snd_mixer_t *mixer_handle;
-    snd_hctl_t *hctl_handle;
     pa_alsa_ucm_mapping_context *context = &m->ucm_context;
     pa_alsa_ucm_device *dev;
     uint32_t idx;
 
     pcm_handle = m->direction == PA_ALSA_DIRECTION_OUTPUT ? m->output_pcm : m->input_pcm;
-    mixer_handle = pa_alsa_open_mixer_for_pcm(pcm_handle, NULL, &hctl_handle);
-    if (!mixer_handle || !hctl_handle)
+    mixer_handle = pa_alsa_open_mixer_for_pcm(pcm_handle, NULL);
+    if (!mixer_handle)
         return;
 
     PA_IDXSET_FOREACH(dev, context->ucm_devices, idx) {
         pa_alsa_jack *jack;
         jack = m->direction == PA_ALSA_DIRECTION_OUTPUT ? dev->output_jack : dev->input_jack;
         pa_assert (jack);
-        jack->has_control = pa_alsa_find_jack(hctl_handle, jack->alsa_name) != NULL;
+        jack->has_control = pa_alsa_mixer_find(mixer_handle, jack->alsa_name, 0) != NULL;
         pa_log_info("UCM jack %s has_control=%d", jack->name, jack->has_control);
     }
 

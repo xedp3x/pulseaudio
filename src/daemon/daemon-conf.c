@@ -139,7 +139,7 @@ static const pa_daemon_conf default_conf = {
    ,.rlimit_rtprio = { .value = 9, .is_set = true }    /* One below JACK's default for the server */
 #endif
 #ifdef RLIMIT_RTTIME
-   ,.rlimit_rttime = { .value = PA_USEC_PER_SEC, .is_set = true }
+   ,.rlimit_rttime = { .value = 200*PA_USEC_PER_MSEC, .is_set = true } /* rtkit's limit is 200 ms */
 #endif
 #endif
 };
@@ -345,8 +345,7 @@ static int parse_sample_rate(pa_config_parser_state *state) {
 
     c = state->data;
 
-    if (pa_atou(state->rvalue, &r) < 0 || r > (uint32_t) PA_RATE_MAX || r <= 0 ||
-        !((r % 4000 == 0) || (r % 11025 == 0))) {
+    if (pa_atou(state->rvalue, &r) < 0 || !pa_sample_rate_valid(r)) {
         pa_log(_("[%s:%u] Invalid sample rate '%s'."), state->filename, state->lineno, state->rvalue);
         return -1;
     }
@@ -363,8 +362,7 @@ static int parse_alternate_sample_rate(pa_config_parser_state *state) {
 
     c = state->data;
 
-    if (pa_atou(state->rvalue, &r) < 0 || r > (uint32_t) PA_RATE_MAX || r <= 0 ||
-        !((r % 4000==0) || (r % 11025 == 0))) {
+    if (pa_atou(state->rvalue, &r) < 0 || !pa_sample_rate_valid(r)) {
         pa_log(_("[%s:%u] Invalid sample rate '%s'."), state->filename, state->lineno, state->rvalue);
         return -1;
     }
@@ -387,7 +385,7 @@ static int parse_sample_channels(pa_config_parser_state *state) {
 
     i = state->data;
 
-    if (pa_atoi(state->rvalue, &n) < 0 || n > (int32_t) PA_CHANNELS_MAX || n <= 0) {
+    if (pa_atoi(state->rvalue, &n) < 0 || !pa_channels_valid(n)) {
         pa_log(_("[%s:%u] Invalid sample channels '%s'."), state->filename, state->lineno, state->rvalue);
         return -1;
     }

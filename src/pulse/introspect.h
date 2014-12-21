@@ -173,6 +173,34 @@
  * \li Sink input - pa_context_kill_sink_input()
  * \li Source output - pa_context_kill_source_output()
  *
+ * It is strongly recommended that all volume changes are done as a direct
+ * result of user input. With automated requests, such as those resulting
+ * from misguided attempts of crossfading, PulseAudio can store the stream
+ * volume at an inappropriate moment and restore it later. Besides, such
+ * attempts lead to OSD popups in some desktop environments.
+ *
+ * As a special case of the general rule above, it is recommended that your
+ * application leaves the task of saving and restoring the volume of its
+ * streams to PulseAudio and does not attempt to do it by itself. PulseAudio
+ * really knows better about events such as stream moving or headphone
+ * plugging that would make the volume stored by the application inapplicable
+ * to the new configuration.
+ *
+ * Another important case where setting a sink input volume may be a bad idea
+ * is related to interpreters that interpret potentially untrusted scripts.
+ * PulseAudio relies on your application not making malicious requests (such
+ * as repeatedly setting the volume to 100%). Thus, script interpreters that
+ * represent a security boundary must sandbox volume-changing requests coming
+ * from their scripts. In the worst case, it may be necessary to apply the
+ * script-requested volume to the script-produced sounds by altering the
+ * samples in the script interpreter and not touching the sink or sink input
+ * volume as seen by PulseAudio.
+ *
+ * If an application changes any volume, it should also listen to changes of
+ * the same volume originating from outside the application (e.g., from the
+ * system mixer application) and update its user interface accordingly. Use
+ * \ref subscribe to get such notifications.
+ *
  * \subsection module_subsec Modules
  *
  * Server modules can be remotely loaded and unloaded using
@@ -298,7 +326,7 @@ typedef struct pa_source_info {
     pa_cvolume volume;                  /**< Volume of the source */
     int mute;                           /**< Mute switch of the sink */
     uint32_t monitor_of_sink;           /**< If this is a monitor source, the index of the owning sink, otherwise PA_INVALID_INDEX. */
-    const char *monitor_of_sink_name;   /**< Name of the owning sink, or PA_INVALID_INDEX. */
+    const char *monitor_of_sink_name;   /**< Name of the owning sink, or NULL. */
     pa_usec_t latency;                  /**< Length of filled record buffer of this source. */
     const char *driver;                 /**< Driver name */
     pa_source_flags_t flags;            /**< Flags */
@@ -482,7 +510,7 @@ typedef struct pa_card_port_info {
     pa_card_profile_info** profiles;    /**< \deprecated Superseded by profiles2 */
     pa_proplist *proplist;              /**< Property list */
     int64_t latency_offset;             /**< Latency offset of the port that gets added to the sink/source latency when the port is active. \since 3.0 */
-    pa_card_profile_info2** profiles2;  /**< Array of pointers to available profiles, or NULL. Array is terminated by an entry set to NULL. */
+    pa_card_profile_info2** profiles2;  /**< Array of pointers to available profiles, or NULL. Array is terminated by an entry set to NULL. \since 5.0 */
 } pa_card_port_info;
 
 /** Stores information about cards. Please note that this structure
@@ -499,8 +527,8 @@ typedef struct pa_card_info {
     pa_proplist *proplist;               /**< Property list */
     uint32_t n_ports;                    /**< Number of entries in port array */
     pa_card_port_info **ports;           /**< Array of pointers to ports, or NULL. Array is terminated by an entry set to NULL. */
-    pa_card_profile_info2** profiles2;    /**< Array of pointers to available profiles, or NULL. Array is terminated by an entry set to NULL. */
-    pa_card_profile_info2* active_profile2; /**< Pointer to active profile in the array, or NULL. */
+    pa_card_profile_info2** profiles2;    /**< Array of pointers to available profiles, or NULL. Array is terminated by an entry set to NULL. \since 5.0 */
+    pa_card_profile_info2* active_profile2; /**< Pointer to active profile in the array, or NULL. \since 5.0 */
 } pa_card_info;
 
 /** Callback prototype for pa_context_get_card_info_...() \since 0.9.15 */

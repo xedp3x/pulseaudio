@@ -178,7 +178,7 @@ static void thread_func(void *userdata) {
             pa_rtpoll_set_timer_disabled(u->rtpoll);
 
         /* Hmm, nothing to do. Let's sleep */
-        if ((ret = pa_rtpoll_run(u->rtpoll, true)) < 0)
+        if ((ret = pa_rtpoll_run(u->rtpoll)) < 0)
             goto fail;
 
         if (ret == 0)
@@ -213,7 +213,7 @@ int pa__init(pa_module*m) {
     ss.channels = 1;
     ss.rate = 44100;
 
-    if (pa_modargs_get_value_u32(ma, "rate", &ss.rate) < 0 || ss.rate <= 1) {
+    if (pa_modargs_get_sample_rate(ma, &ss.rate) < 0) {
         pa_log("Invalid rate specification");
         goto fail;
     }

@@ -317,7 +317,7 @@ static void thread_func(void *arg) {
 		int ret;
 
 
-		if ((ret = pa_rtpoll_run(card->rtpoll, true)) < 0)
+		if ((ret = pa_rtpoll_run(card->rtpoll)) < 0)
 			goto fail;
 
 		if (ret == 0)

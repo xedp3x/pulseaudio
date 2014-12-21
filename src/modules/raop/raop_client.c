@@ -367,18 +367,24 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist* he
 
 pa_raop_client* pa_raop_client_new(pa_core *core, const char* host) {
     pa_parsed_address a;
-    pa_raop_client* c = pa_xnew0(pa_raop_client, 1);
+    pa_raop_client* c;
 
     pa_assert(core);
     pa_assert(host);
 
-    if (pa_parse_address(host, &a) < 0 || a.type == PA_PARSED_ADDRESS_UNIX)
+    if (pa_parse_address(host, &a) < 0)
         return NULL;
 
+    if (a.type == PA_PARSED_ADDRESS_UNIX) {
+        pa_xfree(a.path_or_host);
+        return NULL;
+    }
+
+    c = pa_xnew0(pa_raop_client, 1);
     c->core = core;
     c->fd = -1;
 
-    c->host = pa_xstrdup(a.path_or_host);
+    c->host = a.path_or_host;
     if (a.port)
         c->port = a.port;
     else

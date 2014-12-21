@@ -32,7 +32,9 @@
 #include <pulse/util.h>
 #include <pulse/internal.h>
 
+#include <pulsecore/core-format.h>
 #include <pulsecore/mix.h>
+#include <pulsecore/stream-util.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/log.h>
 #include <pulsecore/namereg.h>
@@ -120,7 +122,7 @@ void pa_source_output_new_data_set_muted(pa_source_output_new_data *data, bool m
     pa_assert(data);
 
     data->muted_is_set = true;
-    data->muted = !!mute;
+    data->muted = mute;
 }
 
 bool pa_source_output_new_data_set_source(pa_source_output_new_data *data, pa_source *s, bool save) {
@@ -161,7 +163,7 @@ bool pa_source_output_new_data_set_formats(pa_source_output_new_data *data, pa_i
     pa_assert(formats);
 
     if (data->req_formats)
-        pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
+        pa_idxset_free(data->req_formats, (pa_free_cb_t) pa_format_info_free);
 
     data->req_formats = formats;
 
@@ -221,11 +223,9 @@ int pa_source_output_new(
     pa_source_output *o;
     pa_resampler *resampler = NULL;
     char st[PA_SAMPLE_SPEC_SNPRINT_MAX], cm[PA_CHANNEL_MAP_SNPRINT_MAX], fmt[PA_FORMAT_INFO_SNPRINT_MAX];
-    pa_channel_map original_cm;
+    pa_channel_map volume_map;
     int r;
     char *pt;
-    pa_sample_spec ss;
-    pa_channel_map map;
 
     pa_assert(_o);
     pa_assert(core);
@@ -242,11 +242,19 @@ int pa_source_output_new(
         /* From this point on, we want to work only with formats, and get back
          * to using the sample spec and channel map after all decisions w.r.t.
          * routing are complete. */
-        pa_idxset *tmp = pa_idxset_new(NULL, NULL);
-        pa_format_info *f = pa_format_info_from_sample_spec(&data->sample_spec,
-                data->channel_map_is_set ? &data->channel_map : NULL);
-        pa_idxset_put(tmp, f, NULL);
-        pa_source_output_new_data_set_formats(data, tmp);
+        pa_format_info *f;
+        pa_idxset *formats;
+
+        f = pa_format_info_from_sample_spec2(&data->sample_spec, data->channel_map_is_set ? &data->channel_map : NULL,
+                                             !(data->flags & PA_SOURCE_OUTPUT_FIX_FORMAT),
+                                             !(data->flags & PA_SOURCE_OUTPUT_FIX_RATE),
+                                             !(data->flags & PA_SOURCE_OUTPUT_FIX_CHANNELS));
+        if (!f)
+            return -PA_ERR_INVALID;
+
+        formats = pa_idxset_new(NULL, NULL);
+        pa_idxset_put(formats, f, NULL);
+        pa_source_output_new_data_set_formats(data, formats);
     }
 
     if ((r = pa_hook_fire(&core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_NEW], data)) < 0)
@@ -268,9 +276,6 @@ int pa_source_output_new(
         pa_source_output_new_data_set_source(data, source, false);
     }
 
-    /* Routing's done, we have a source. Now let's fix the format and set up the
-     * sample spec */
-
     /* If something didn't pick a format for us, pick the top-most format since
      * we assume this is sorted in priority order */
     if (!data->format && data->nego_formats && !pa_idxset_isempty(data->nego_formats))
@@ -289,29 +294,27 @@ int pa_source_output_new(
         return -PA_ERR_NOTSUPPORTED;
     }
 
-    /* Now populate the sample spec and format according to the final
-     * format that we've negotiated */
-    pa_return_val_if_fail(pa_format_info_to_sample_spec(data->format, &ss, &map) == 0, -PA_ERR_INVALID);
-    pa_source_output_new_data_set_sample_spec(data, &ss);
-    if (pa_format_info_is_pcm(data->format) && pa_channel_map_valid(&map))
-        pa_source_output_new_data_set_channel_map(data, &map);
-
     pa_return_val_if_fail(PA_SOURCE_IS_LINKED(pa_source_get_state(data->source)), -PA_ERR_BADSTATE);
     pa_return_val_if_fail(!data->direct_on_input || data->direct_on_input->sink == data->source->monitor_of, -PA_ERR_INVALID);
 
-    if (!data->sample_spec_is_set)
-        data->sample_spec = data->source->sample_spec;
+    /* Routing is done. We have a source and a format. */
 
-    pa_return_val_if_fail(pa_sample_spec_valid(&data->sample_spec), -PA_ERR_INVALID);
-
-    if (!data->channel_map_is_set) {
-        if (pa_channel_map_compatible(&data->source->channel_map, &data->sample_spec))
-            data->channel_map = data->source->channel_map;
-        else
-            pa_channel_map_init_extend(&data->channel_map, data->sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
+    if (data->volume_is_set && pa_format_info_is_pcm(data->format)) {
+        /* If volume is set, we need to save the original data->channel_map,
+         * so that we can remap the volume from the original channel map to the
+         * final channel map of the stream in case data->channel_map gets
+         * modified in pa_format_info_to_sample_spec2(). */
+        r = pa_stream_get_volume_channel_map(&data->volume, data->channel_map_is_set ? &data->channel_map : NULL, data->format, &volume_map);
+        if (r < 0)
+            return r;
     }
 
-    pa_return_val_if_fail(pa_channel_map_compatible(&data->channel_map, &data->sample_spec), -PA_ERR_INVALID);
+    /* Now populate the sample spec and channel map according to the final
+     * format that we've negotiated */
+    r = pa_format_info_to_sample_spec2(data->format, &data->sample_spec, &data->channel_map, &data->source->sample_spec,
+                                       &data->source->channel_map);
+    if (r < 0)
+        return r;
 
     /* Don't restore (or save) stream volume for passthrough streams and
      * prevent attenuation/gain */
@@ -331,7 +334,10 @@ int pa_source_output_new(
     if (!data->volume_writable)
         data->save_volume = false;
 
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume, &data->sample_spec), -PA_ERR_INVALID);
+    if (data->volume_is_set)
+        /* The original volume channel map may be different than the final
+         * stream channel map, so remapping may be needed. */
+        pa_cvolume_remap(&data->volume, &volume_map, &data->channel_map);
 
     if (!data->volume_factor_is_set)
         pa_cvolume_reset(&data->volume_factor, data->sample_spec.channels);
@@ -345,31 +351,6 @@ int pa_source_output_new(
 
     if (!data->muted_is_set)
         data->muted = false;
-
-    if (data->flags & PA_SOURCE_OUTPUT_FIX_FORMAT) {
-        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
-        data->sample_spec.format = data->source->sample_spec.format;
-        pa_format_info_set_sample_format(data->format, data->sample_spec.format);
-    }
-
-    if (data->flags & PA_SOURCE_OUTPUT_FIX_RATE) {
-        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
-        pa_format_info_set_rate(data->format, data->sample_spec.rate);
-        data->sample_spec.rate = data->source->sample_spec.rate;
-    }
-
-    original_cm = data->channel_map;
-
-    if (data->flags & PA_SOURCE_OUTPUT_FIX_CHANNELS) {
-        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
-        data->sample_spec.channels = data->source->sample_spec.channels;
-        data->channel_map = data->source->channel_map;
-        pa_format_info_set_channels(data->format, data->sample_spec.channels);
-        pa_format_info_set_channel_map(data->format, &data->channel_map);
-    }
-
-    pa_assert(pa_sample_spec_valid(&data->sample_spec));
-    pa_assert(pa_channel_map_valid(&data->channel_map));
 
     if (!(data->flags & PA_SOURCE_OUTPUT_VARIABLE_RATE) &&
         !pa_sample_spec_equal(&data->sample_spec, &data->source->sample_spec)) {
@@ -388,9 +369,6 @@ int pa_source_output_new(
         pa_log_debug("Could not update source sample spec to match passthrough stream");
         return -PA_ERR_NOTSUPPORTED;
     }
-
-    /* Due to the fixing of the sample spec the volume might not match anymore */
-    pa_cvolume_remap(&data->volume, &original_cm, &data->channel_map);
 
     if (data->resample_method == PA_RESAMPLER_INVALID)
         data->resample_method = core->resample_method;
@@ -994,7 +972,7 @@ void pa_source_output_set_volume(pa_source_output *o, const pa_cvolume *volume, 
         return;
     }
 
-    o->volume = *volume;
+    pa_source_output_set_volume_direct(o, volume);
     o->save_volume = save;
 
     if (pa_source_flat_volume_enabled(o->source)) {
@@ -1079,16 +1057,22 @@ pa_cvolume *pa_source_output_get_volume(pa_source_output *o, pa_cvolume *volume,
 
 /* Called from main context */
 void pa_source_output_set_mute(pa_source_output *o, bool mute, bool save) {
+    bool old_mute;
+
     pa_source_output_assert_ref(o);
     pa_assert_ctl_context();
     pa_assert(PA_SOURCE_OUTPUT_IS_LINKED(o->state));
 
-    if (!o->muted == !mute) {
-        o->save_muted = o->save_muted || mute;
+    old_mute = o->muted;
+
+    if (mute == old_mute) {
+        o->save_muted |= save;
         return;
     }
 
     o->muted = mute;
+    pa_log_debug("The mute of source output %u changed from %s to %s.", o->index, pa_yes_no(old_mute), pa_yes_no(mute));
+
     o->save_muted = save;
 
     pa_assert_se(pa_asyncmsgq_send(o->source->asyncmsgq, PA_MSGOBJECT(o), PA_SOURCE_OUTPUT_MESSAGE_SET_SOFT_MUTE, NULL, 0, NULL) == 0);
@@ -1098,15 +1082,7 @@ void pa_source_output_set_mute(pa_source_output *o, bool mute, bool save) {
         o->mute_changed(o);
 
     pa_subscription_post(o->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, o->index);
-}
-
-/* Called from main context */
-bool pa_source_output_get_mute(pa_source_output *o) {
-    pa_source_output_assert_ref(o);
-    pa_assert_ctl_context();
-    pa_assert(PA_SOURCE_OUTPUT_IS_LINKED(o->state));
-
-    return o->muted;
+    pa_hook_fire(&o->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MUTE_CHANGED], o);
 }
 
 /* Called from main thread */
@@ -1199,7 +1175,7 @@ bool pa_source_output_may_move(pa_source_output *o) {
 }
 
 static bool find_filter_source_output(pa_source_output *target, pa_source *s) {
-    int i = 0;
+    unsigned PA_UNUSED i = 0;
     while (s && s->output_from_master) {
         if (s->output_from_master == target)
             return true;
@@ -1284,7 +1260,7 @@ int pa_source_output_start_move(pa_source_output *o) {
  * then also the origin source and all streams connected to it need to update
  * their volume - this function does all that by using recursion. */
 static void update_volume_due_to_moving(pa_source_output *o, pa_source *dest) {
-    pa_cvolume old_volume;
+    pa_cvolume new_volume;
 
     pa_assert(o);
     pa_assert(dest);
@@ -1335,19 +1311,11 @@ static void update_volume_due_to_moving(pa_source_output *o, pa_source *dest) {
              *          always have volume_factor as soft_volume, so no change
              *          should be needed) */
 
-            old_volume = o->volume;
-            pa_cvolume_reset(&o->volume, o->volume.channels);
-            pa_cvolume_reset(&o->reference_ratio, o->reference_ratio.channels);
+            pa_cvolume_reset(&new_volume, o->volume.channels);
+            pa_source_output_set_volume_direct(o, &new_volume);
+            pa_source_output_set_reference_ratio(o, &new_volume);
             pa_assert(pa_cvolume_is_norm(&o->real_ratio));
             pa_assert(pa_cvolume_equal(&o->soft_volume, &o->volume_factor));
-
-            /* Notify others about the changed source output volume. */
-            if (!pa_cvolume_equal(&o->volume, &old_volume)) {
-                if (o->volume_changed)
-                    o->volume_changed(o);
-
-                pa_subscription_post(o->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, o->index);
-            }
         }
 
         /* Additionally, the origin source volume needs updating:
@@ -1358,33 +1326,27 @@ static void update_volume_due_to_moving(pa_source_output *o, pa_source *dest) {
          *         (sources that use volume sharing should always have
          *          soft_volume of 0 dB) */
 
-        old_volume = o->destination_source->reference_volume;
-
-        o->destination_source->reference_volume = root_source->reference_volume;
-        pa_cvolume_remap(&o->destination_source->reference_volume, &root_source->channel_map, &o->destination_source->channel_map);
+        new_volume = root_source->reference_volume;
+        pa_cvolume_remap(&new_volume, &root_source->channel_map, &o->destination_source->channel_map);
+        pa_source_set_reference_volume_direct(o->destination_source, &new_volume);
 
         o->destination_source->real_volume = root_source->real_volume;
         pa_cvolume_remap(&o->destination_source->real_volume, &root_source->channel_map, &o->destination_source->channel_map);
 
         pa_assert(pa_cvolume_is_norm(&o->destination_source->soft_volume));
 
-        /* Notify others about the changed source volume. If you wonder whether
-         * o->destination_source->set_volume() should be called somewhere, that's not
-         * the case, because sources that use volume sharing shouldn't have any
-         * internal volume that set_volume() would update. If you wonder
-         * whether the thread_info variables should be synced, yes, they
-         * should, and it's done by the PA_SOURCE_MESSAGE_FINISH_MOVE message
-         * handler. */
-        if (!pa_cvolume_equal(&o->destination_source->reference_volume, &old_volume))
-            pa_subscription_post(o->core, PA_SUBSCRIPTION_EVENT_SOURCE|PA_SUBSCRIPTION_EVENT_CHANGE, o->destination_source->index);
+        /* If you wonder whether o->destination_source->set_volume() should be
+         * called somewhere, that's not the case, because sources that use
+         * volume sharing shouldn't have any internal volume that set_volume()
+         * would update. If you wonder whether the thread_info variables should
+         * be synced, yes, they should, and it's done by the
+         * PA_SOURCE_MESSAGE_FINISH_MOVE message handler. */
 
         /* Recursively update origin source outputs. */
         PA_IDXSET_FOREACH(destination_source_output, o->destination_source->outputs, idx)
             update_volume_due_to_moving(destination_source_output, dest);
 
     } else {
-        old_volume = o->volume;
-
         if (pa_source_flat_volume_enabled(o->source)) {
             /* Ok, so this is a regular stream, and flat volume is enabled. The
              * volume will have to be updated as follows:
@@ -1396,9 +1358,10 @@ static void update_volume_due_to_moving(pa_source_output *o, pa_source *dest) {
              *     o->soft_volume := o->real_ratio * o->volume_factor
              *         (handled later by pa_source_set_volume) */
 
-            o->volume = o->source->reference_volume;
-            pa_cvolume_remap(&o->volume, &o->source->channel_map, &o->channel_map);
-            pa_sw_cvolume_multiply(&o->volume, &o->volume, &o->reference_ratio);
+            new_volume = o->source->reference_volume;
+            pa_cvolume_remap(&new_volume, &o->source->channel_map, &o->channel_map);
+            pa_sw_cvolume_multiply(&new_volume, &new_volume, &o->reference_ratio);
+            pa_source_output_set_volume_direct(o, &new_volume);
 
         } else {
             /* Ok, so this is a regular stream, and flat volume is disabled.
@@ -1409,20 +1372,9 @@ static void update_volume_due_to_moving(pa_source_output *o, pa_source *dest) {
              *     o->real_ratio := o->reference_ratio
              *     o->soft_volume := o->real_ratio * o->volume_factor */
 
-            o->volume = o->reference_ratio;
+            pa_source_output_set_volume_direct(o, &o->reference_ratio);
             o->real_ratio = o->reference_ratio;
             pa_sw_cvolume_multiply(&o->soft_volume, &o->real_ratio, &o->volume_factor);
-        }
-
-        /* Notify others about the changed source output volume. */
-        if (!pa_cvolume_equal(&o->volume, &old_volume)) {
-            /* XXX: In case o->source has flat volume enabled, then real_ratio
-             * and soft_volume are not updated yet. Let's hope that the
-             * callback implementation doesn't care about those variables... */
-            if (o->volume_changed)
-                o->volume_changed(o);
-
-            pa_subscription_post(o->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, o->index);
         }
     }
 
@@ -1678,7 +1630,8 @@ int pa_source_output_update_rate(pa_source_output *o) {
                                      o->requested_resample_method,
                                      ((o->flags & PA_SOURCE_OUTPUT_VARIABLE_RATE) ? PA_RESAMPLER_VARIABLE_RATE : 0) |
                                      ((o->flags & PA_SOURCE_OUTPUT_NO_REMAP) ? PA_RESAMPLER_NO_REMAP : 0) |
-                                     (o->core->disable_remixing || (o->flags & PA_SOURCE_OUTPUT_NO_REMIX) ? PA_RESAMPLER_NO_REMIX : 0));
+                                     (o->core->disable_remixing || (o->flags & PA_SOURCE_OUTPUT_NO_REMIX) ? PA_RESAMPLER_NO_REMIX : 0) |
+                                     (o->core->disable_lfe_remixing ? PA_RESAMPLER_NO_LFE : 0));
 
         if (!new_resampler) {
             pa_log_warn("Unsupported resampling operation.");
@@ -1715,4 +1668,54 @@ int pa_source_output_update_rate(pa_source_output *o) {
     pa_log_debug("Updated resampler for source output %d", o->index);
 
     return 0;
+}
+
+/* Called from the main thread. */
+void pa_source_output_set_volume_direct(pa_source_output *o, const pa_cvolume *volume) {
+    pa_cvolume old_volume;
+    char old_volume_str[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+    char new_volume_str[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+
+    pa_assert(o);
+    pa_assert(volume);
+
+    old_volume = o->volume;
+
+    if (pa_cvolume_equal(volume, &old_volume))
+        return;
+
+    o->volume = *volume;
+    pa_log_debug("The volume of source output %u changed from %s to %s.", o->index,
+                 pa_cvolume_snprint_verbose(old_volume_str, sizeof(old_volume_str), &old_volume, &o->channel_map, true),
+                 pa_cvolume_snprint_verbose(new_volume_str, sizeof(new_volume_str), volume, &o->channel_map, true));
+
+    if (o->volume_changed)
+        o->volume_changed(o);
+
+    pa_subscription_post(o->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, o->index);
+    pa_hook_fire(&o->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_VOLUME_CHANGED], o);
+}
+
+/* Called from the main thread. */
+void pa_source_output_set_reference_ratio(pa_source_output *o, const pa_cvolume *ratio) {
+    pa_cvolume old_ratio;
+    char old_ratio_str[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+    char new_ratio_str[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+
+    pa_assert(o);
+    pa_assert(ratio);
+
+    old_ratio = o->reference_ratio;
+
+    if (pa_cvolume_equal(ratio, &old_ratio))
+        return;
+
+    o->reference_ratio = *ratio;
+
+    if (!PA_SOURCE_OUTPUT_IS_LINKED(o->state))
+        return;
+
+    pa_log_debug("Source output %u reference ratio changed from %s to %s.", o->index,
+                 pa_cvolume_snprint_verbose(old_ratio_str, sizeof(old_ratio_str), &old_ratio, &o->channel_map, true),
+                 pa_cvolume_snprint_verbose(new_ratio_str, sizeof(new_ratio_str), ratio, &o->channel_map, true));
 }

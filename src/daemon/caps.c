@@ -39,7 +39,7 @@
 #include "caps.h"
 
 /* Glibc <= 2.2 has broken unistd.h */
-#if defined(linux) && (__GLIBC__ <= 2 && __GLIBC_MINOR__ <= 2)
+#if defined(__linux__) && (__GLIBC__ <= 2 && __GLIBC_MINOR__ <= 2)
 int setresgid(gid_t r, gid_t e, gid_t s);
 int setresuid(uid_t r, uid_t e, uid_t s);
 #endif
@@ -51,7 +51,7 @@ void pa_drop_root(void) {
     uid_t uid;
     gid_t gid;
 
-    pa_log_debug(_("Cleaning up privileges."));
+    pa_log_debug("Cleaning up privileges.");
     uid = getuid();
     gid = getgid();
 
@@ -80,14 +80,22 @@ void pa_drop_root(void) {
 
 void pa_drop_caps(void) {
 #ifdef HAVE_SYS_CAPABILITY_H
+#if defined(__linux__)
     cap_t caps;
     pa_assert_se(caps = cap_init());
     pa_assert_se(cap_clear(caps) == 0);
     pa_assert_se(cap_set_proc(caps) == 0);
     pa_assert_se(cap_free(caps) == 0);
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+    /* FreeBSD doesn't have this functionality, even though sys/capability.h is
+     * available. See https://bugs.freedesktop.org/show_bug.cgi?id=72580 */
+    pa_log_warn("FreeBSD cannot drop extra capabilities, implementation needed.");
 #else
+#error "Don't know how to do capabilities on your system.  Please send a patch."
+#endif /* __linux__ */
+#else /* HAVE_SYS_CAPABILITY_H */
     pa_log_warn("Normally all extra capabilities would be dropped now, but "
-                "that's impossible because this Pulseaudio was built without "
-                "libcap support.");
+                "that's impossible because PulseAudio was built without "
+                "capabilities support.");
 #endif
 }
