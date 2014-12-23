@@ -305,8 +305,6 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	const char **ports = NULL, **p;
 	pa_sample_spec ss;
 
-	pa_log_debug("init_card");
-
 	card->name = name;
 	card->base = base;
 	card->is_sink = is_sink;
@@ -317,7 +315,6 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 	pa_thread_mq_init(&card->thread_mq, base->core->mainloop, card->rtpoll);
 
-	pa_log_debug("Jack Handler");
 	/* Jack handler */
 	card->jack_msgq = pa_asyncmsgq_new(0);
 	card->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(card->rtpoll, PA_RTPOLL_EARLY - 1, card->jack_msgq);
@@ -336,14 +333,12 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 		goto fail;
 	}
 
-	pa_log_debug("ss 383");
 	/* set sample rate */
 	ss.rate = jack_get_sample_rate(card->jack);
 	ss.format = PA_SAMPLE_FLOAT32NE;
 	card->channels = ss.channels = base->core->default_sample_spec.channels;
 	pa_assert(pa_sample_spec_valid(&ss));
 
-	pa_log_debug("PA Handler 389");
 	/* PA handler */
 	if (card->is_sink) {
 		pa_sink_new_data data;
@@ -416,7 +411,6 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 	}
 
-	pa_log_debug("Jack Ports");
 	/* Jack ports */
 	for (i = 0; i < ss.channels; i++) {
 	        if (!(card->port[i] = jack_port_register(card->jack, pa_channel_position_to_string(base->core->default_channel_map.map[i]), JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
@@ -442,7 +436,6 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	}
 
 	/* init thread */
-	pa_log_debug("init thread");
 	jack_port_get_latency_range(card->port[0], JackCaptureLatency, &r);
 	if (card->is_sink) {
 		size_t n;
@@ -471,7 +464,7 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 	return card;
 
-	fail:
+fail:
 	pa_log("card_init fatal error");
 	abort();
 	if (ports)
@@ -483,14 +476,12 @@ void unload_card(void* arg,bool forced){
 	struct sCard* card = arg;
 	struct sBase* base = card->base;
 
-	pa_log_warn("unload_card with force: %i",forced);
 	if (!forced){
 		pa_usec_t now;
 		now = pa_rtclock_now();
 		pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
 		return;
 	}
-
 
 	if(card->is_sink){
 		if (pa_idxset_size(card->sink->inputs) > 0) {
@@ -579,7 +570,7 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 
 		PA_IDXSET_FOREACH(sink, c->sinks, idx){
 			if (!strcmp(pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_JACK_REF)),pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID)))){
-				pa_log("secend sink from %s...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID));
+				pa_log_info("secend sink from %s...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID));
 				pa_sink_input_move_to(sink_input, sink, false);
 				return PA_HOOK_OK;
 			}
@@ -682,7 +673,6 @@ int pa__init(pa_module*m) {
 	struct sCard *card;
 	const char *server_name;
 	uint32_t delay = 5;
-	pa_log_debug("PA init");
 
 	m->userdata = base = pa_xnew0(struct sBase, 1);
 	base->core = m->core;
