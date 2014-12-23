@@ -60,6 +60,7 @@ PA_MODULE_USAGE(
 		"source_properties=<properties for the card> "
 		"server_name=<jack server name> "
 		"connect=<connect new ports to speaker/mic?>"
+		"merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
 		"delay=<delay before remove unused application bridge>"
 );
 
@@ -68,6 +69,7 @@ static const char* const valid_modargs[] = {
 	"source_properties",
 	"server_name",
 	"connect",
+	"merge",
 	"delay",
 	NULL
 };
@@ -247,7 +249,6 @@ static void thread_func(void *arg) {
 
 	for (;;) {
 		int ret;
-
 
 		if ((ret = pa_rtpoll_run(card->rtpoll)) < 0)
 			goto fail;
@@ -524,6 +525,19 @@ void unload_card(void* arg,bool forced){
 	pa_xfree(card);
 }
 
+char *get_merge_ref(pa_proplist *p, struct sBase *base){
+	switch (base->merge){
+	case 1:
+		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_ID));
+	case 2:
+		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_BINARY));
+	case 3:
+		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_NAME));
+	default:
+		return NULL;
+	}
+}
+
 static pa_hook_result_t sink_input_move_fail_hook_callback(pa_core *c, pa_sink_input *i, void *u) {
     pa_sink *target;
     target = pa_namereg_get_default_sink(c);
@@ -567,18 +581,20 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 		uint32_t idx;
 		pa_sink *sink;
 		struct sCard* card;
+		char *merge_ref = get_merge_ref(sink_input->proplist, base);
 
-		PA_IDXSET_FOREACH(sink, c->sinks, idx){
-			if (!strcmp(pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_JACK_REF)),pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID)))){
-				pa_log_info("secend sink from %s...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID));
-				pa_sink_input_move_to(sink_input, sink, false);
-				return PA_HOOK_OK;
-			}
-		}
+		if (merge_ref)
+			PA_IDXSET_FOREACH(sink, c->sinks, idx)
+				if (!strcmp(pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_JACK_REF)),merge_ref)){
+					pa_log_info("secend sink from %s...",merge_ref);
+					pa_sink_input_move_to(sink_input, sink, false);
+					return PA_HOOK_OK;
+				}
 
 		card = init_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME),true);
-		pa_proplist_sets(sink_input->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_REF, pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_PROCESS_ID));
+		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+		if (merge_ref)
+			pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_REF, merge_ref);
 
 		if (pa_sink_input_move_to(sink_input, card->sink, false) < 0)
 			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
@@ -599,18 +615,21 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 		uint32_t idx;
 		pa_source *source;
 		struct sCard* card;
+		char *merge_ref = get_merge_ref(source_output->proplist, base);
 
-		PA_IDXSET_FOREACH(source, c->sources, idx){
-			if (!strcmp(pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_JACK_REF)),pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_PROCESS_ID)))){
-				pa_log("secend source from %s...",pa_proplist_gets(source->proplist, PA_PROP_JACK_REF));
-				pa_source_output_move_to(source_output, source, false);
-				return PA_HOOK_OK;
+		if (merge_ref)
+			PA_IDXSET_FOREACH(source, c->sources, idx){
+				if (!strcmp(pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_JACK_REF)),merge_ref)){
+					pa_log_info("secend source from %s...",merge_ref);
+					pa_source_output_move_to(source_output, source, false);
+					return PA_HOOK_OK;
+				}
 			}
-		}
 
 		card= init_card(base,pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME),false);
-		pa_proplist_sets(source_output->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_PROCESS_ID));
+		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+		if (merge_ref)
+			pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, merge_ref);
 
 		if (pa_source_output_move_to(source_output, card->source, false) < 0)
 			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
@@ -621,30 +640,14 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 }
 
 static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink_input *sink_input, struct sBase* base) {
-	uint32_t idx;
-	pa_sink *sink;
-
-	if (pa_proplist_gets(sink_input->proplist, PA_PROP_JACK_CLIENT) != NULL){
-		PA_IDXSET_FOREACH(sink, c->sinks, idx){
-			if (!strcmp(pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_JACK_CLIENT)),pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_JACK_CLIENT)))){
-				unload_card(sink->userdata,false);
-			}
-		}
-	}
+	if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL)
+		unload_card(sink_input->sink->userdata,false);
 	return PA_HOOK_OK;
 }
 
 static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output *source_output, struct sBase* base) {
-	uint32_t idx;
-	pa_source *source;
-
-	if (pa_proplist_gets(source_output->proplist, PA_PROP_JACK_CLIENT) != NULL){
-		PA_IDXSET_FOREACH(source, c->sources, idx){
-			if (!strcmp(pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_JACK_CLIENT)),pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_JACK_CLIENT)))){
-				unload_card(source->userdata,false);
-			}
-		}
-	}
+	if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL)
+		unload_card(source_output->source->userdata,false);
 	return PA_HOOK_OK;
 }
 
@@ -692,8 +695,16 @@ int pa__init(pa_module*m) {
 		return -1;
 	}
 
+	base->merge = 1;
+	if (pa_modargs_get_value_u32(base->ma, "merge", &(base->merge)) < 0) {
+		pa_log("Failed to parse merge value.");
+		pa__done(m);
+		return -1;
+	}
+
 	if (pa_modargs_get_value_u32(base->ma, "delay", &delay) < 0) {
 		pa_log("Failed to parse delay value. It must be a number > 0 (in sec.).");
+		pa__done(m);
 		return -1;
     }
     base->delay = delay * PA_USEC_PER_SEC;
@@ -705,13 +716,14 @@ int pa__init(pa_module*m) {
 	jack_set_error_function(jack_error_func);
 
 	/* register hooks */
-	base->sink_put_slot					= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_PUT], PA_HOOK_LATE+30, (pa_hook_cb_t) sink_put_hook_callback, base);
-	base->sink_unlink_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_UNLINK], PA_HOOK_LATE+30, (pa_hook_cb_t) sink_unlink_hook_callback, base);
-	base->source_put_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_PUT], PA_HOOK_LATE+30, (pa_hook_cb_t) source_put_hook_callback, base);
-	base->source_unlink_slot			= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_UNLINK], PA_HOOK_LATE+30, (pa_hook_cb_t) source_unlink_hook_callback, base);
-	base->sink_input_move_fail_slot		= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
-	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
+	base->sink_put_slot					= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_PUT],				PA_HOOK_LATE+30, (pa_hook_cb_t) sink_put_hook_callback, base);
+	base->sink_unlink_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_UNLINK],			PA_HOOK_LATE+30, (pa_hook_cb_t) sink_unlink_hook_callback, base);
+	base->source_put_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_PUT],			PA_HOOK_LATE+30, (pa_hook_cb_t) source_put_hook_callback, base);
+	base->source_unlink_slot			= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_UNLINK],		PA_HOOK_LATE+30, (pa_hook_cb_t) source_unlink_hook_callback, base);
+	base->sink_input_move_fail_slot		= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL],		PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
+	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL],	PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
 
+	/* fixes the same problems as module-always-sink */
 	card = init_card(base,"Pulse-to-Jack",true);
 	pa_namereg_set_default_sink(base->core,card->sink);
 	card = init_card(base,"Jack-to-Pulse",false);
