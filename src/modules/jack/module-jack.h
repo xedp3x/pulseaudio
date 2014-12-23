@@ -1,10 +1,8 @@
 
 #define PA_PROP_JACK_CLIENT "jack.name"
 #define PA_PROP_JACK_REF "jack.ref"
-
-
-void* init_card(void* arg, const char *name, bool is_sink);
-void unload_card(void* arg,bool forced);
+#define PA_USEC_INVALID ((pa_usec_t) -1)
+#define PA_USEC_PER_SEC ((pa_usec_t) 1000000ULL)
 
 struct sBase {
 	pa_core *core;
@@ -13,6 +11,7 @@ struct sBase {
 
 	bool autoconnect;
 	char server_name;
+	pa_usec_t delay;
 
     pa_hook_slot
 		*sink_put_slot,
@@ -31,6 +30,7 @@ struct sCard {
 	pa_sink *sink;
 	pa_source *source;
 
+	pa_time_event *time_event;
 	pa_rtpoll_item *rtpoll_item;
 
 	pa_thread_mq thread_mq;
@@ -57,3 +57,7 @@ enum {
 	SINK_MESSAGE_BUFFER_SIZE,
 	SINK_MESSAGE_ON_SHUTDOWN
 };
+
+void* init_card(void* arg, const char *name, bool is_sink);
+void unload_card(void* arg,bool forced);
+static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata);

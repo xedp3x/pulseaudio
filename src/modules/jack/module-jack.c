@@ -36,6 +36,8 @@
 #include <jack/jack.h>
 
 #include <pulse/xmalloc.h>
+#include <pulse/timeval.h>
+#include <pulse/rtclock.h>
 #include <pulsecore/sink.h>
 #include <pulsecore/module.h>
 #include <pulsecore/core-util.h>
@@ -57,7 +59,8 @@ PA_MODULE_USAGE(
 		"sink_properties=<properties for the card> "
 		"source_properties=<properties for the card> "
 		"server_name=<jack server name> "
-		"connect=<connect ports?>"
+		"connect=<connect new ports to speaker/mic?>"
+		"delay=<delay before remove unused application bridge>"
 );
 
 static const char* const valid_modargs[] = {
@@ -65,6 +68,7 @@ static const char* const valid_modargs[] = {
 	"source_properties",
 	"server_name",
 	"connect",
+	"delay",
 	NULL
 };
 
@@ -307,6 +311,7 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	card->base = base;
 	card->is_sink = is_sink;
 
+	card->time_event = pa_core_rttime_new(base->core, PA_USEC_INVALID, timeout_cb, card);
 	card->rtpoll = pa_rtpoll_new();
 	card->saved_frame_time_valid = false;
 
@@ -478,10 +483,17 @@ void unload_card(void* arg,bool forced){
 	struct sCard* card = arg;
 	struct sBase* base = card->base;
 
+	pa_log_warn("unload_card with force: %i",forced);
+	if (!forced){
+		pa_usec_t now;
+		now = pa_rtclock_now();
+		pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
+		return;
+	}
+
+
 	if(card->is_sink){
 		if (pa_idxset_size(card->sink->inputs) > 0) {
-			if (!forced)
-				return;
 			pa_sink *def;
 			pa_sink_input *i;
 			uint32_t idx;
@@ -493,8 +505,6 @@ void unload_card(void* arg,bool forced){
 		pa_sink_unlink(card->sink);
 	}else{
 		if (pa_idxset_size(card->source->outputs) > 0) {
-			if (!forced)
-				return;
 			pa_source *def;
 			pa_source_output *o;
 			uint32_t idx;
@@ -505,6 +515,7 @@ void unload_card(void* arg,bool forced){
 		}
 		pa_source_unlink(card->source);
 	}
+	base->core->mainloop->time_free(card->time_event);
 
 	jack_client_close(card->jack);
 	pa_asyncmsgq_send(card->thread_mq.inq, NULL, PA_MESSAGE_SHUTDOWN, NULL, 0, NULL);
@@ -646,11 +657,31 @@ static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output
 	return PA_HOOK_OK;
 }
 
+static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
+    struct sCard *card = userdata;
+	struct sBase *base = card->base;
+
+    pa_assert(card);
+    pa_assert(base);
+
+    base->core->mainloop->time_restart(card->time_event, NULL);
+
+	if(card->is_sink){
+		if (pa_idxset_size(card->sink->inputs) > 0)
+			return;
+	}else{
+		if (pa_idxset_size(card->source->outputs) > 0)
+			return;
+	}
+	unload_card(userdata,true);
+}
+
 int pa__init(pa_module*m) {
 	/* init base */
 	struct sBase *base = NULL;
 	struct sCard *card;
 	const char *server_name;
+	uint32_t delay = 5;
 	pa_log_debug("PA init");
 
 	m->userdata = base = pa_xnew0(struct sBase, 1);
@@ -670,6 +701,12 @@ int pa__init(pa_module*m) {
 		pa__done(m);
 		return -1;
 	}
+
+	if (pa_modargs_get_value_u32(base->ma, "delay", &delay) < 0) {
+		pa_log("Failed to parse delay value. It must be a number > 0 (in sec.).");
+		return -1;
+    }
+    base->delay = delay * PA_USEC_PER_SEC;
 
 	/* init Jack */
 	server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
