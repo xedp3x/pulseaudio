@@ -45,11 +45,9 @@
 #include <pulsecore/thread-mq.h>
 #include <pulsecore/rtpoll.h>
 #include <pulsecore/sample-util.h>
+
 #include "module-jack-symdef.h"
-
-#define PA_PROP_JACK_CLIENT "jack.name"
-#define PA_PROP_JACK_REF "jack.ref"
-
+#include "module-jack.h"
 
 PA_MODULE_AUTHOR("Mario Krueger");
 PA_MODULE_DESCRIPTION("JACK");
@@ -68,57 +66,6 @@ static const char* const valid_modargs[] = {
 	"server_name",
 	"connect",
 	NULL
-};
-
-struct sBase {
-	pa_core *core;
-	pa_module *module;
-	pa_modargs *ma;
-
-	bool autoconnect;
-	char server_name;
-
-    pa_hook_slot
-		*sink_put_slot,
-		*sink_unlink_slot,
-		*source_put_slot,
-		*source_unlink_slot,
-		*sink_input_move_fail_slot,
-		*source_output_move_fail_slot;
-};
-
-struct sCard {
-	void *base;
-	bool is_sink;
-	char *name;
-
-	pa_sink *sink;
-	pa_source *source;
-
-	pa_rtpoll_item *rtpoll_item;
-
-	pa_thread_mq thread_mq;
-	pa_thread *thread;
-	pa_asyncmsgq *jack_msgq;
-	pa_rtpoll *rtpoll;
-
-	jack_client_t *jack;
-	jack_port_t *port[PA_CHANNELS_MAX];
-	jack_nframes_t frames_in_buffer;
-	jack_nframes_t saved_frame_time;
-	bool saved_frame_time_valid;
-
-	unsigned channels;
-	unsigned ports[PA_CHANNELS_MAX];
-	void *buffer[PA_CHANNELS_MAX];
-};
-
-enum {
-	SOURCE_MESSAGE_POST = PA_SOURCE_MESSAGE_MAX,
-	SOURCE_MESSAGE_ON_SHUTDOWN,
-	SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
-	SINK_MESSAGE_BUFFER_SIZE,
-	SINK_MESSAGE_ON_SHUTDOWN
 };
 
 static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
@@ -527,26 +474,32 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	return NULL;
 }
 
-void* unload_card(void* arg,bool forced){
+void unload_card(void* arg,bool forced){
 	struct sCard* card = arg;
 	struct sBase* base = card->base;
 
 	if(card->is_sink){
 		if (pa_idxset_size(card->sink->inputs) > 0) {
-			pa_sink *def = pa_namereg_get_default_sink(base->core);
+			if (!forced)
+				return;
+			pa_sink *def;
 			pa_sink_input *i;
 			uint32_t idx;
 
+			def = pa_namereg_get_default_sink(base->core);
 		    PA_IDXSET_FOREACH(i, card->sink->inputs, idx)
 				pa_sink_input_move_to(i, def, false);
 		}
 		pa_sink_unlink(card->sink);
 	}else{
 		if (pa_idxset_size(card->source->outputs) > 0) {
-			pa_source *def = pa_namereg_get_default_source(base->core);
+			if (!forced)
+				return;
+			pa_source *def;
 			pa_source_output *o;
 			uint32_t idx;
 
+			def = pa_namereg_get_default_source(base->core);
 			PA_IDXSET_FOREACH(o, card->source->outputs, idx)
 				pa_source_output_move_to(o, def, false);
 		}
@@ -570,7 +523,8 @@ void* unload_card(void* arg,bool forced){
 }
 
 static pa_hook_result_t sink_input_move_fail_hook_callback(pa_core *c, pa_sink_input *i, void *u) {
-    pa_sink *target = pa_namereg_get_default_sink(c);
+    pa_sink *target;
+    target = pa_namereg_get_default_sink(c);
 
     pa_assert(c);
     pa_assert(i);
@@ -585,7 +539,8 @@ static pa_hook_result_t sink_input_move_fail_hook_callback(pa_core *c, pa_sink_i
 }
 
 static pa_hook_result_t source_output_move_fail_hook_callback(pa_core *c, pa_source_output *i, void *u) {
-    pa_source *target = pa_namereg_get_default_source(c);
+    pa_source *target;
+    target = pa_namereg_get_default_source(c);
 
     pa_assert(c);
     pa_assert(i);
@@ -651,7 +606,7 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 			}
 		}
 
-		card= init_card(base,strcat(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME),"-mic"),false);
+		card= init_card(base,pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME),false);
 		pa_proplist_sets(source_output->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
 		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_PROCESS_ID));
 
@@ -695,6 +650,7 @@ int pa__init(pa_module*m) {
 	/* init base */
 	struct sBase *base = NULL;
 	struct sCard *card;
+	const char *server_name;
 	pa_log_debug("PA init");
 
 	m->userdata = base = pa_xnew0(struct sBase, 1);
@@ -716,18 +672,18 @@ int pa__init(pa_module*m) {
 	}
 
 	/* init Jack */
-	//pa_modargs_get_value(base->ma, "server_name", &base->server_name);
-	base->server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
+	server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
+	if (server_name)
+		base->server_name = *server_name;
 	jack_set_error_function(jack_error_func);
-
 
 	/* register hooks */
 	base->sink_put_slot					= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_PUT], PA_HOOK_LATE+30, (pa_hook_cb_t) sink_put_hook_callback, base);
 	base->sink_unlink_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_UNLINK], PA_HOOK_LATE+30, (pa_hook_cb_t) sink_unlink_hook_callback, base);
 	base->source_put_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_PUT], PA_HOOK_LATE+30, (pa_hook_cb_t) source_put_hook_callback, base);
 	base->source_unlink_slot			= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_UNLINK], PA_HOOK_LATE+30, (pa_hook_cb_t) source_unlink_hook_callback, base);
-	base->sink_input_move_fail_slot 	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
-	base->source_output_move_fail_slot 	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
+	base->sink_input_move_fail_slot		= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
+	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
 
 	card = init_card(base,"Pulse-to-Jack",true);
 	pa_namereg_set_default_sink(base->core,card->sink);
