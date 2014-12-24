@@ -1,4 +1,3 @@
-
 #define PA_PROP_JACK_CLIENT "jack.name"
 #define PA_PROP_JACK_REF "jack.ref"
 #define PA_USEC_INVALID ((pa_usec_t) -1)

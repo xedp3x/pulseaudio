@@ -220,9 +220,9 @@ static int jack_process(jack_nframes_t nframes, void *arg) {
 		frame_time = jack_frame_time(card->jack);
 		pa_assert_se(pa_asyncmsgq_send(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_RENDER, &frame_time, nframes, NULL) == 0);
 	} else {
-		for (c = 0; c < card->channels; c++){
+		for (c = 0; c < card->channels; c++)
 			pa_assert_se(buffer[c] = jack_port_get_buffer(card->port[c], nframes));
-		}
+
 		pa_memchunk_reset(&chunk);
 		chunk.length = nframes * pa_frame_size(&card->source->sample_spec);
 		chunk.memblock = pa_memblock_new(base->core->mempool, chunk.length);
@@ -412,7 +412,6 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 		pa_source_set_asyncmsgq(card->source, card->thread_mq.inq);
 		pa_source_set_rtpoll(card->source, card->rtpoll);
-
 	}
 
 	/* Jack ports */
