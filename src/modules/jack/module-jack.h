@@ -62,4 +62,4 @@ enum {
 void* init_card(void* arg, const char *name, bool is_sink);
 void unload_card(void* arg,bool forced);
 static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata);
-char* get_merge_ref(pa_proplist *p, struct sBase *base);
+const char* get_merge_ref(pa_proplist *p, struct sBase *base);

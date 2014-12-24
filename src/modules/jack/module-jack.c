@@ -47,6 +47,7 @@
 #include <pulsecore/thread-mq.h>
 #include <pulsecore/rtpoll.h>
 #include <pulsecore/sample-util.h>
+#include <pulsecore/namereg.h>
 
 #include "module-jack-symdef.h"
 #include "module-jack.h"
@@ -354,6 +355,7 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
 		pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
 		pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+		pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
 
 		if (pa_modargs_get_proplist(base->ma, "sink_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
 			pa_log("Invalid properties");
@@ -389,6 +391,7 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
 		pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
 		pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+		pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
 
 		if (pa_modargs_get_proplist(base->ma, "source_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
 			pa_log("Invalid properties");
@@ -525,7 +528,7 @@ void unload_card(void* arg,bool forced){
 	pa_xfree(card);
 }
 
-char *get_merge_ref(pa_proplist *p, struct sBase *base){
+const char *get_merge_ref(pa_proplist *p, struct sBase *base){
 	switch (base->merge){
 	case 1:
 		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_ID));
@@ -581,7 +584,7 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 		uint32_t idx;
 		pa_sink *sink;
 		struct sCard* card;
-		char *merge_ref = get_merge_ref(sink_input->proplist, base);
+		const char *merge_ref = get_merge_ref(sink_input->proplist, base);
 
 		if (merge_ref)
 			PA_IDXSET_FOREACH(sink, c->sinks, idx)
@@ -615,7 +618,8 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 		uint32_t idx;
 		pa_source *source;
 		struct sCard* card;
-		char *merge_ref = get_merge_ref(source_output->proplist, base);
+		char *name;
+		const char *merge_ref = get_merge_ref(source_output->proplist, base);
 
 		if (merge_ref)
 			PA_IDXSET_FOREACH(source, c->sources, idx){
@@ -626,7 +630,8 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 				}
 			}
 
-		card= init_card(base,pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME),false);
+		name = (char *)pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME);
+		card= init_card(base,strcat(name,"-mic"),false);
 		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
 		if (merge_ref)
 			pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, merge_ref);
