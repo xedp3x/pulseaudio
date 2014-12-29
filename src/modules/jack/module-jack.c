@@ -38,6 +38,7 @@
 #include <pulse/xmalloc.h>
 #include <pulse/timeval.h>
 #include <pulse/rtclock.h>
+#include <pulse/channelmap.h>
 #include <pulsecore/sink.h>
 #include <pulsecore/module.h>
 #include <pulsecore/core-util.h>
@@ -298,7 +299,7 @@ static void jack_shutdown(void* arg) {
 	}
 }
 
-void* init_card(void* arg, const char *name, bool is_sink) {
+void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 	struct sCard *card = malloc(sizeof(struct sCard));
 	struct sBase *base = arg;
 	unsigned i;
@@ -306,6 +307,8 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	jack_latency_range_t r;
 	const char **ports = NULL, **p;
 	pa_sample_spec ss;
+	char *port_name;
+	pa_channel_map map;
 
 	card->name = name;
 	card->base = base;
@@ -338,8 +341,16 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 	/* set sample rate */
 	ss.rate = jack_get_sample_rate(card->jack);
 	ss.format = PA_SAMPLE_FLOAT32NE;
-	card->channels = ss.channels = base->core->default_sample_spec.channels;
+	if (channels == 0)
+		card->channels = ss.channels = base->core->default_sample_spec.channels;
+	else
+		card->channels = ss.channels = channels;
 	pa_assert(pa_sample_spec_valid(&ss));
+
+	if (card->channels == base->core->default_channel_map.channels)
+		map = base->core->default_channel_map;
+	else
+		pa_channel_map_init_extend(&map, card->channels, PA_CHANNEL_MAP_AUX);
 
 	/* PA handler */
 	if (card->is_sink) {
@@ -350,6 +361,8 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 		pa_sink_new_data_set_name(&data, card->name);
 		pa_sink_new_data_set_sample_spec(&data, &ss);
+		pa_sink_new_data_set_channel_map(&data, &map);
+
 
 		if (base->server_name)
 			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
@@ -386,6 +399,7 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 		pa_source_new_data_init(&data);
 		pa_source_new_data_set_name(&data, card->name);
 		pa_source_new_data_set_sample_spec(&data, &ss);
+		pa_source_new_data_set_channel_map(&data, &map);
 
 		if (base->server_name)
 			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
@@ -416,11 +430,19 @@ void* init_card(void* arg, const char *name, bool is_sink) {
 
 	/* Jack ports */
 	for (i = 0; i < ss.channels; i++) {
-	        if (!(card->port[i] = jack_port_register(card->jack, pa_channel_position_to_string(base->core->default_channel_map.map[i]), JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
-	            pa_log("jack_port_register() failed.");
-	            goto fail;
-	        }
+		switch(i){
+			case 0: port_name = (char*) "left"; break;
+			case 1: port_name = (char*) "right"; break;
+			default:
+				port_name = malloc(10);
+				sprintf(port_name, "Port_%d", i+1);
+		}
+		pa_log("Port: %s",port_name);
+	    if (!(card->port[i] = jack_port_register(card->jack, port_name, JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
+			pa_log("jack_port_register() failed.");
+			goto fail;
 	    }
+	}
 
 	if (base->autoconnect) {
 		ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (card->is_sink ? JackPortIsInput : JackPortIsOutput));
@@ -593,7 +615,7 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 					return PA_HOOK_OK;
 				}
 
-		card = init_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME),true);
+		card = init_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME),true, sink_input->sample_spec.channels);
 		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
 		if (merge_ref)
 			pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_REF, merge_ref);
@@ -630,7 +652,7 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 			}
 
 		name = (char *)pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME);
-		card= init_card(base,strcat(name,"-mic"),false);
+		card= init_card(base,strcat(name,"-mic"),false,source_output->sample_spec.channels);
 		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
 		if (merge_ref)
 			pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, merge_ref);
@@ -728,9 +750,9 @@ int pa__init(pa_module*m) {
 	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL],	PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
 
 	/* fixes the same problems as module-always-sink */
-	card = init_card(base,"Pulse-to-Jack",true);
+	card = init_card(base,"Pulse-to-Jack",true,0);
 	pa_namereg_set_default_sink(base->core,card->sink);
-	card = init_card(base,"Jack-to-Pulse",false);
+	card = init_card(base,"Jack-to-Pulse",false,0);
 	pa_namereg_set_default_source(base->core,card->source);
 
 	return 0;
