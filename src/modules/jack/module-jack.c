@@ -313,6 +313,10 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 	card->name = name;
 	card->base = base;
 	card->is_sink = is_sink;
+    card->merge_ref = NULL;
+
+	card->inputs  = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+	card->outputs = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
 	card->time_event = pa_core_rttime_new(base->core, PA_USEC_INVALID, timeout_cb, card);
 	card->rtpoll = pa_rtpoll_new();
@@ -487,6 +491,7 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 	if (ports)
 		jack_free(ports);
 
+	pa_idxset_put(base->cards, card, NULL);
 	return card;
 
 fail:
@@ -546,6 +551,13 @@ void unload_card(void* arg,bool forced){
 	pa_rtpoll_item_free(card->rtpoll_item);
 	pa_asyncmsgq_unref(card->jack_msgq);
 	pa_rtpoll_free(card->rtpoll);
+
+	if (card->inputs)
+		pa_idxset_free(card->inputs, NULL);
+	if (card->outputs)
+		pa_idxset_free(card->outputs, NULL);
+
+	pa_idxset_remove_by_data(base->cards, card, NULL);
 	pa_xfree(card);
 }
 
@@ -603,22 +615,24 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 		pa_log_info("%s don't own jack-link...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
 	}else{
 		uint32_t idx;
-		pa_sink *sink;
 		struct sCard* card;
 		const char *merge_ref = get_merge_ref(sink_input->proplist, base);
 
-		if (merge_ref)
-			PA_IDXSET_FOREACH(sink, c->sinks, idx)
-				if (!strcmp(pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_JACK_REF)),merge_ref)){
-					pa_log_info("secend sink from %s...",merge_ref);
-					pa_sink_input_move_to(sink_input, sink, false);
-					return PA_HOOK_OK;
-				}
+        if (merge_ref)
+            PA_IDXSET_FOREACH(card, base->cards, idx)
+                if (card->merge_ref)
+                    if ((!strcmp(card->merge_ref, merge_ref)) && (card->is_sink)) {
+                        pa_log_info("secend sink from %s...", merge_ref);
+                        pa_sink_input_move_to(sink_input, card->sink, false);
+                        pa_idxset_put(card->inputs, sink_input, NULL);
+                        return PA_HOOK_OK;
+                    }
 
 		card = init_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME),true, sink_input->sample_spec.channels);
+		pa_idxset_put(card->inputs, sink_input, NULL);
 		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		if (merge_ref)
-			pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_REF, merge_ref);
+        card->merge_ref = malloc(strlen(merge_ref)+1);
+        memcpy(card->merge_ref,merge_ref,strlen(merge_ref)+1);
 
 		if (pa_sink_input_move_to(sink_input, card->sink, false) < 0)
 			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
@@ -637,25 +651,26 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 		pa_log_info("%s don't own jack-link...",pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
 	}else{
 		uint32_t idx;
-		pa_source *source;
 		struct sCard* card;
 		char *name;
 		const char *merge_ref = get_merge_ref(source_output->proplist, base);
 
-		if (merge_ref)
-			PA_IDXSET_FOREACH(source, c->sources, idx){
-				if (!strcmp(pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_JACK_REF)),merge_ref)){
-					pa_log_info("secend source from %s...",merge_ref);
-					pa_source_output_move_to(source_output, source, false);
-					return PA_HOOK_OK;
-				}
-			}
+        if (merge_ref)
+            PA_IDXSET_FOREACH(card, base->cards, idx)
+                if (card->merge_ref)
+                    if ((pa_streq(card->merge_ref,merge_ref)) && (!card->is_sink)){
+                        pa_log_info("secend source from %s...",merge_ref);
+                        pa_source_output_move_to(source_output, card->source, false);
+                        pa_idxset_put(card->outputs, source_output, NULL);
+                        return PA_HOOK_OK;
+                    }
 
 		name = (char *)pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME);
 		card= init_card(base,strcat(name,"-mic"),false,source_output->sample_spec.channels);
+		pa_idxset_put(card->outputs, source_output, NULL);
 		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		if (merge_ref)
-			pa_proplist_sets(card->source->proplist, PA_PROP_JACK_REF, merge_ref);
+        card->merge_ref = malloc(strlen(merge_ref)+1);
+        memcpy(card->merge_ref,merge_ref,strlen(merge_ref)+1);
 
 		if (pa_source_output_move_to(source_output, card->source, false) < 0)
 			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
@@ -666,14 +681,20 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 }
 
 static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink_input *sink_input, struct sBase* base) {
-	if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL)
-		unload_card(sink_input->sink->userdata,false);
+	if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL){
+		struct sCard* card = sink_input->sink->userdata;
+		pa_idxset_remove_by_data(card->inputs, sink_input, NULL);
+		unload_card(card,false);
+	}
 	return PA_HOOK_OK;
 }
 
 static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output *source_output, struct sBase* base) {
-	if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL)
-		unload_card(source_output->source->userdata,false);
+	if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL){
+		struct sCard* card = source_output->source->userdata;
+		pa_idxset_remove_by_data(card->outputs, source_output, NULL);
+		unload_card(card,false);
+	}
 	return PA_HOOK_OK;
 }
 
@@ -706,6 +727,7 @@ int pa__init(pa_module*m) {
 	m->userdata = base = pa_xnew0(struct sBase, 1);
 	base->core = m->core;
 	base->module = m;
+	base->cards = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
 	/* read Config */
 	if (!(base->ma = pa_modargs_new(m->argument, valid_modargs))) {
@@ -760,14 +782,16 @@ int pa__init(pa_module*m) {
 
 void pa__done(pa_module*m) {
 	struct sBase *base;
+    struct sCard *card;
 	uint32_t idx;
-	pa_sink *sink;
-	pa_source *source;
 
 	pa_assert(m);
 
 	if (!(base = m->userdata))
 		return;
+
+	if (base->cards)
+		pa_idxset_free(base->cards, NULL);
 
 	if (base->ma)
 		pa_modargs_free(base->ma);
@@ -785,16 +809,8 @@ void pa__done(pa_module*m) {
 	if (base->source_output_move_fail_slot)
 		pa_hook_slot_free(base->source_output_move_fail_slot);
 
-	PA_IDXSET_FOREACH(sink, base->core->sinks, idx){
-		if (pa_proplist_gets(sink->proplist, PA_PROP_JACK_CLIENT) != NULL){
-			unload_card(sink->userdata,true);
-		}
-	}
-
-	PA_IDXSET_FOREACH(source, base->core->sources, idx){
-		if (pa_proplist_gets(source->proplist, PA_PROP_JACK_CLIENT) != NULL){
-			unload_card(source->userdata,true);
-		}
+	PA_IDXSET_FOREACH(card, base->cards, idx){
+        unload_card(card,true);
 	}
 
 	pa_xfree(base);

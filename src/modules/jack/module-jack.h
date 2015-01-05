@@ -1,5 +1,4 @@
 #define PA_PROP_JACK_CLIENT "jack.name"
-#define PA_PROP_JACK_REF "jack.ref"
 #define PA_USEC_INVALID ((pa_usec_t) -1)
 #define PA_USEC_PER_SEC ((pa_usec_t) 1000000ULL)
 
@@ -12,6 +11,8 @@ struct sBase {
 	char server_name;
 	uint32_t merge;
 	pa_usec_t delay;
+
+	pa_idxset *cards;
 
     pa_hook_slot
 		*sink_put_slot,
@@ -26,9 +27,12 @@ struct sCard {
 	void *base;
 	bool is_sink;
 	char const *name;
+    char *merge_ref;
 
 	pa_sink *sink;
 	pa_source *source;
+
+	pa_idxset *inputs, *outputs;
 
 	pa_time_event *time_event;
 	pa_rtpoll_item *rtpoll_item;
