@@ -29,9 +29,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <errno.h>
 #include <string.h>
-#include <unistd.h>
 
 #include <jack/jack.h>
 
@@ -40,15 +38,11 @@
 #include <pulse/rtclock.h>
 #include <pulse/channelmap.h>
 #include <pulsecore/sink.h>
-#include <pulsecore/module.h>
 #include <pulsecore/core-util.h>
 #include <pulsecore/modargs.h>
-#include <pulsecore/log.h>
 #include <pulsecore/thread.h>
-#include <pulsecore/thread-mq.h>
-#include <pulsecore/rtpoll.h>
-#include <pulsecore/sample-util.h>
 #include <pulsecore/namereg.h>
+#include <expat_config.h>
 
 #include "module-jack-symdef.h"
 #include "module-jack.h"
@@ -58,9 +52,9 @@ PA_MODULE_DESCRIPTION("JACK");
 PA_MODULE_LOAD_ONCE(true);
 PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_USAGE(
-		"sink_properties=<properties for the card> "
-		"source_properties=<properties for the card> "
-		"server_name=<jack server name> "
+		"sink_properties=<properties for the card>"
+		"source_properties=<properties for the card>"
+		"server_name=<jack server name>"
 		"connect=<connect new ports to speaker/mic?>"
 		"merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
 		"delay=<delay before remove unused application bridge>"
@@ -80,7 +74,7 @@ static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t off
 	struct sCard *card = PA_SOURCE(o)->userdata;
 	struct sBase *base = card->base;
 
-	switch (code) {
+    switch (code) {
 		case SOURCE_MESSAGE_POST:
 			/* Handle the new block from the JACK thread */
 			pa_assert(chunk);
@@ -120,9 +114,9 @@ static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t off
 			*((pa_usec_t*) data) = pa_bytes_to_usec(n, &card->source->sample_spec);
 			return 0;
 		}
-	}
-
-	return pa_source_process_msg(o, code, data, offset, chunk);
+        default:
+            return pa_source_process_msg(o, code, data, offset, chunk);
+    }
 }
 
 static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *memchunk) {
@@ -201,8 +195,10 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
 
 			return 0;
 		}
-	}
-	return pa_sink_process_msg(o, code, data, offset, memchunk);
+
+        default:
+            return pa_sink_process_msg(o, code, data, offset, memchunk);
+    }
 }
 
 static int jack_process(jack_nframes_t nframes, void *arg) {
@@ -299,7 +295,7 @@ static void jack_shutdown(void* arg) {
 	}
 }
 
-void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
+void* init_card(void* arg, const char *name, bool is_sink, uint8_t channels) {
 	struct sCard *card = malloc(sizeof(struct sCard));
 	struct sBase *base = arg;
 	unsigned i;
@@ -367,7 +363,6 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 		pa_sink_new_data_set_sample_spec(&data, &ss);
 		pa_sink_new_data_set_channel_map(&data, &map);
 
-
 		if (base->server_name)
 			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
 		pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
@@ -381,7 +376,6 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 		}
 
 		card->sink = pa_sink_new(base->core, &data, PA_SINK_LATENCY);
-
 		pa_sink_new_data_done(&data);
 
 		if (!card->sink) {
@@ -435,13 +429,18 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 	/* Jack ports */
 	for (i = 0; i < ss.channels; i++) {
 		switch(i){
-			case 0: port_name = (char*) "left"; break;
+			case 0:
+                if (ss.channels == 1) {
+                    port_name = (char *) "mono";
+                } else {
+                    port_name = (char *) "left";
+                }
+                break;
 			case 1: port_name = (char*) "right"; break;
 			default:
 				port_name = malloc(10);
 				sprintf(port_name, "Port_%d", i+1);
 		}
-		pa_log("Port: %s",port_name);
 	    if (!(card->port[i] = jack_port_register(card->jack, port_name, JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
 			pa_log("jack_port_register() failed.");
 			goto fail;
@@ -451,17 +450,16 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 	if (base->autoconnect) {
 		ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (card->is_sink ? JackPortIsInput : JackPortIsOutput));
 		for (i = 0, p = ports; i < ss.channels; i++, p++) {
-
 			if (!p || !*p) {
 				pa_log("Not enough physical output ports, leaving unconnected.");
 				break;
 			}
-
 			if (jack_connect(card->jack,(card->is_sink ? jack_port_name(card->port[i]) : *p), (card->is_sink ? *p : jack_port_name(card->port[i])))) {
 				pa_log("Failed to connect %s to %s, leaving unconnected.", jack_port_name(card->port[i]), *p);
 				break;
 			}
 		}
+        jack_free(ports);
 	}
 
 	/* init thread */
@@ -488,17 +486,12 @@ void* init_card(void* arg, const char *name, bool is_sink, unsigned channels) {
 		pa_source_put(card->source);
 	}
 
-	if (ports)
-		jack_free(ports);
-
 	pa_idxset_put(base->cards, card, NULL);
 	return card;
 
 fail:
 	pa_log("card_init fatal error");
 	abort();
-	if (ports)
-		jack_free(ports);
 	return NULL;
 }
 
