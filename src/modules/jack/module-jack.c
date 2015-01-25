@@ -97,7 +97,7 @@ static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t off
 			size_t n;
 
 			/* This is the "worst-case" latency */
-			jack_port_get_latency_range(card->port[0], JackCaptureLatency, &r);
+			jack_port_get_latency_range(card->source_port[0], JackCaptureLatency, &r);
 			l = r.max;
 
 			if (card->saved_frame_time_valid) {
@@ -141,7 +141,7 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
 				card->sink->thread_info.rewind_requested = rewind_requested;
 
 				p = pa_memblock_acquire_chunk(&chunk);
-				pa_deinterleave(p, card->buffer, card->channels, sizeof(float),(unsigned) offset);
+				pa_deinterleave(p, card->sink_buffer, card->sink_channels, sizeof(float),(unsigned) offset);
 				pa_memblock_release(chunk.memblock);
 
 				pa_memblock_unref(chunk.memblock);
@@ -155,8 +155,8 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
 				ss = card->sink->sample_spec;
 				ss.channels = 1;
 
-				for (c = 0; c < card->channels; c++)
-					pa_silence_memory(card->buffer[c],(size_t) offset * pa_sample_size(&ss), &ss);
+				for (c = 0; c < card->sink_channels; c++)
+					pa_silence_memory(card->sink_buffer[c],(size_t) offset * pa_sample_size(&ss), &ss);
 			}
 			card->frames_in_buffer = (jack_nframes_t) offset;
 			card->saved_frame_time = *(jack_nframes_t*) data;
@@ -177,7 +177,7 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
 			size_t n;
 
 			/* This is the "worst-case" latency */
-			jack_port_get_latency_range(card->port[0], JackPlaybackLatency, &r);
+			jack_port_get_latency_range(card->sink_port[0], JackPlaybackLatency, &r);
 			l = r.max + card->frames_in_buffer;
 
 			if (card->saved_frame_time_valid) {
@@ -211,20 +211,21 @@ static int jack_process(jack_nframes_t nframes, void *arg) {
 	pa_memchunk chunk;
 	pa_assert(card);
 
-	if (card->is_sink) {
-		for (c = 0; c < card->channels; c++)
-			pa_assert_se(card->buffer[c] = jack_port_get_buffer(card->port[c], nframes));
+	if (card->sink) {
+		for (c = 0; c < card->sink_channels; c++)
+			pa_assert_se(card->sink_buffer[c] = jack_port_get_buffer(card->sink_port[c], nframes));
 		frame_time = jack_frame_time(card->jack);
 		pa_assert_se(pa_asyncmsgq_send(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_RENDER, &frame_time, nframes, NULL) == 0);
-	} else {
-		for (c = 0; c < card->channels; c++)
-			pa_assert_se(buffer[c] = jack_port_get_buffer(card->port[c], nframes));
+	}
+    if (card->source) {
+		for (c = 0; c < card->source_channels; c++)
+			pa_assert_se(buffer[c] = jack_port_get_buffer(card->source_port[c], nframes));
 
 		pa_memchunk_reset(&chunk);
 		chunk.length = nframes * pa_frame_size(&card->source->sample_spec);
 		chunk.memblock = pa_memblock_new(base->core->mempool, chunk.length);
 		p = pa_memblock_acquire(chunk.memblock);
-		pa_interleave(buffer, card->channels, p, sizeof(float), nframes);
+		pa_interleave(buffer, card->source_channels, p, sizeof(float), nframes);
 		pa_memblock_release(chunk.memblock);
 		frame_time = jack_frame_time(card->jack);
 		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source),SOURCE_MESSAGE_POST, NULL, frame_time, &chunk, NULL);
@@ -248,8 +249,10 @@ static void thread_func(void *arg) {
 	for (;;) {
 		int ret;
 
-		if ((ret = pa_rtpoll_run(card->rtpoll)) < 0)
-			goto fail;
+		if ((ret = pa_rtpoll_run(card->rtpoll)) < 0) {
+            pa_log("fail in thread_func");
+            goto fail;
+        }
 
 		if (ret == 0)
 			goto finish;
@@ -288,211 +291,267 @@ static void jack_shutdown(void* arg) {
 
 	pa_log_info("JACK thread shutting down..");
 
-	if (card->is_sink) {
+	if (card->sink) {
 		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
-	} else {
+	}
+    if (card->source) {
 		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source), SOURCE_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
 	}
 }
 
-void* init_card(void* arg, const char *name, bool is_sink, uint8_t channels) {
-	struct sCard *card = malloc(sizeof(struct sCard));
-	struct sBase *base = arg;
-	unsigned i;
-	jack_status_t status;
-	jack_latency_range_t r;
-	const char **ports = NULL, **p;
-	pa_sample_spec ss;
-	char *port_name;
-	pa_channel_map map;
+void* create_card(void* arg, const char *name){
+    struct sCard *card = malloc(sizeof(struct sCard));
+    struct sBase *base = arg;
+    jack_status_t status;
 
-	card->name = name;
-	card->base = base;
-	card->is_sink = is_sink;
     card->merge_ref = NULL;
+    card->sink = NULL;
+    card->source = NULL;
 
-	card->inputs  = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
-	card->outputs = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+    card->name = name;
+    card->base = base;
 
-	card->time_event = pa_core_rttime_new(base->core, PA_USEC_INVALID, timeout_cb, card);
-	card->rtpoll = pa_rtpoll_new();
-	card->saved_frame_time_valid = false;
+    card->inputs  = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+    card->outputs = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
-	pa_thread_mq_init(&card->thread_mq, base->core->mainloop, card->rtpoll);
+    card->time_event = pa_core_rttime_new(base->core, PA_USEC_INVALID, timeout_cb, card);
+    card->rtpoll = pa_rtpoll_new();
+    card->saved_frame_time_valid = false;
 
-	/* Jack handler */
-	card->jack_msgq = pa_asyncmsgq_new(0);
-	card->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(card->rtpoll, PA_RTPOLL_EARLY - 1, card->jack_msgq);
-	if (!(card->jack = jack_client_open(card->name, base->server_name ? JackServerName : JackNullOption, &status, base->server_name))) {
-		pa_log("jack_client_open() failed.");
-		goto fail;
-	}
-	pa_log_info("Successfully connected as '%s'", jack_get_client_name(card->jack));
+    pa_thread_mq_init(&card->thread_mq, base->core->mainloop, card->rtpoll);
 
-	jack_set_process_callback(card->jack, jack_process, card);
-	jack_on_shutdown(card->jack, jack_shutdown, &card);
-	jack_set_thread_init_callback(card->jack, jack_init, card);
+    /* Jack handler */
+    card->jack_msgq = pa_asyncmsgq_new(0);
+    card->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(card->rtpoll, PA_RTPOLL_EARLY - 1, card->jack_msgq);
+    if (!(card->jack = jack_client_open(card->name, base->server_name ? JackServerName : JackNullOption, &status, base->server_name))) {
+        pa_log("jack_client_open() failed.");
+        goto fail;
+    }
+    pa_log_info("Successfully connected as '%s'", jack_get_client_name(card->jack));
 
-	if (jack_activate(card->jack)) {
-		pa_log("jack_activate() failed");
-		goto fail;
-	}
+    jack_set_process_callback(card->jack, jack_process, card);
+    jack_on_shutdown(card->jack, jack_shutdown, &card);
+    jack_set_thread_init_callback(card->jack, jack_init, card);
 
-	/* set sample rate */
-	ss.rate = jack_get_sample_rate(card->jack);
-	ss.format = PA_SAMPLE_FLOAT32NE;
-	if (channels == 0)
-		card->channels = ss.channels = base->core->default_sample_spec.channels;
-	else
-		card->channels = ss.channels = channels;
-	pa_assert(pa_sample_spec_valid(&ss));
+    if (jack_activate(card->jack)) {
+        pa_log("jack_activate() failed");
+        goto fail;
+    }
 
-	if (card->channels == base->core->default_channel_map.channels)
-		map = base->core->default_channel_map;
-	else
-		pa_channel_map_init_extend(&map, card->channels, PA_CHANNEL_MAP_AUX);
+    if (!(card->thread = pa_thread_new(jack_get_client_name(card->jack),thread_func, card))) {
+        pa_log("Failed to create thread.");
+        goto fail;
+    }
 
-	/* PA handler */
-	if (card->is_sink) {
-		pa_sink_new_data data;
-		pa_sink_new_data_init(&data);
-		data.driver = __FILE__;
-		data.module = base->module;
-
-		pa_sink_new_data_set_name(&data, card->name);
-		pa_sink_new_data_set_sample_spec(&data, &ss);
-		pa_sink_new_data_set_channel_map(&data, &map);
-
-		if (base->server_name)
-			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
-		pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
-		pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
-
-		if (pa_modargs_get_proplist(base->ma, "sink_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
-			pa_log("Invalid properties");
-			pa_sink_new_data_done(&data);
-			goto fail;
-		}
-
-		card->sink = pa_sink_new(base->core, &data, PA_SINK_LATENCY);
-		pa_sink_new_data_done(&data);
-
-		if (!card->sink) {
-			pa_log("Failed to create sink.");
-			goto fail;
-		}
-
-		card->sink->parent.process_msg = pa_process_sink_msg;
-		card->sink->userdata = card;
-		card->source = NULL;
-
-		pa_sink_set_asyncmsgq(card->sink, card->thread_mq.inq);
-		pa_sink_set_rtpoll(card->sink, card->rtpoll);
-		pa_sink_set_max_request(card->sink,jack_get_buffer_size(card->jack)* pa_frame_size(&card->sink->sample_spec));
-	} else {
-		pa_source_new_data data;
-		data.driver = __FILE__;
-		data.module = base->module;
-		pa_source_new_data_init(&data);
-		pa_source_new_data_set_name(&data, card->name);
-		pa_source_new_data_set_sample_spec(&data, &ss);
-		pa_source_new_data_set_channel_map(&data, &map);
-
-		if (base->server_name)
-			pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
-		pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
-		pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
-		pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
-
-		if (pa_modargs_get_proplist(base->ma, "source_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
-			pa_log("Invalid properties");
-			pa_source_new_data_done(&data);
-			goto fail;
-		}
-
-		card->source = pa_source_new(base->core, &data, PA_SOURCE_LATENCY);
-		pa_source_new_data_done(&data);
-
-		if (!card->source) {
-			pa_log("Failed to create source.");
-			goto fail;
-		}
-		card->source->parent.process_msg = source_process_msg;
-		card->source->userdata = card;
-		card->sink = NULL;
-
-		pa_source_set_asyncmsgq(card->source, card->thread_mq.inq);
-		pa_source_set_rtpoll(card->source, card->rtpoll);
-	}
-
-	/* Jack ports */
-	for (i = 0; i < ss.channels; i++) {
-		switch(i){
-			case 0:
-                if (ss.channels == 1) {
-                    port_name = (char *) "mono";
-                } else {
-                    port_name = (char *) "left";
-                }
-                break;
-			case 1: port_name = (char*) "right"; break;
-			default:
-				port_name = malloc(10);
-				sprintf(port_name, "Port_%d", i+1);
-		}
-	    if (!(card->port[i] = jack_port_register(card->jack, port_name, JACK_DEFAULT_AUDIO_TYPE, (card->is_sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
-			pa_log("jack_port_register() failed.");
-			goto fail;
-	    }
-	}
-
-	if (base->autoconnect) {
-		ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (card->is_sink ? JackPortIsInput : JackPortIsOutput));
-		for (i = 0, p = ports; i < ss.channels; i++, p++) {
-			if (!p || !*p) {
-				pa_log("Not enough physical output ports, leaving unconnected.");
-				break;
-			}
-			if (jack_connect(card->jack,(card->is_sink ? jack_port_name(card->port[i]) : *p), (card->is_sink ? *p : jack_port_name(card->port[i])))) {
-				pa_log("Failed to connect %s to %s, leaving unconnected.", jack_port_name(card->port[i]), *p);
-				break;
-			}
-		}
-        jack_free(ports);
-	}
-
-	/* init thread */
-	jack_port_get_latency_range(card->port[0], JackCaptureLatency, &r);
-	if (card->is_sink) {
-		size_t n;
-		n = r.max * pa_frame_size(&card->sink->sample_spec);
-		pa_sink_set_fixed_latency(card->sink,pa_bytes_to_usec(n, &card->sink->sample_spec));
-
-		if (!(card->thread = pa_thread_new(jack_get_client_name(card->jack),thread_func, card))) {
-			pa_log("Failed to create thread.");
-			goto fail;
-		}
-		pa_sink_put(card->sink);
-	} else {
-		size_t n;
-		n = r.max * pa_frame_size(&card->source->sample_spec);
-		pa_source_set_fixed_latency(card->source,pa_bytes_to_usec(n, &card->source->sample_spec));
-
-		if (!(card->thread = pa_thread_new(jack_get_client_name(card->jack),thread_func, card))) {
-			pa_log("Failed to create thread.");
-			goto fail;
-		}
-		pa_source_put(card->source);
-	}
-
-	pa_idxset_put(base->cards, card, NULL);
-	return card;
+    pa_idxset_put(base->cards, card, NULL);
+    return card;
 
 fail:
-	pa_log("card_init fatal error");
-	abort();
-	return NULL;
+    pa_log("create_card fatal error");
+    abort();
+    return NULL;
+}
+
+void* add_bridge(void *arg, bool sink, uint8_t channels) {
+    struct sCard *card = arg;
+    struct sBase *base = card->base;
+    const char **ports = NULL, **p;
+    char *port_name;
+    unsigned i;
+    bool autoconnect;
+    pa_sample_spec ss;
+    pa_channel_map map;
+    jack_latency_range_t r;
+    jack_port_t *port;
+
+    if (sink){
+        if (card->sink) {
+            pa_log("This card have already a sink!");
+            return NULL;
+        }
+    } else {
+        if (card->source){
+            pa_log("This card have already a source!");
+            return NULL;
+        }
+    }
+
+    /* set sample rate */
+    ss.rate = jack_get_sample_rate(card->jack);
+    ss.format = PA_SAMPLE_FLOAT32NE;
+    if (channels == 0)
+        ss.channels = base->core->default_sample_spec.channels;
+    else
+        ss.channels = channels;
+
+    if (sink)
+        card->sink_channels = ss.channels;
+    else
+        card->source_channels = ss.channels;
+
+    pa_assert(pa_sample_spec_valid(&ss));
+
+    if (ss.channels == base->core->default_channel_map.channels)
+        map = base->core->default_channel_map;
+    else
+        pa_channel_map_init_extend(&map, ss.channels, PA_CHANNEL_MAP_AUX);
+
+    /* PA handler */
+    if (sink){
+        pa_sink_new_data data;
+        pa_sink_new_data_init(&data);
+        data.driver = __FILE__;
+        data.module = base->module;
+
+        pa_sink_new_data_set_name(&data, card->name);
+        pa_sink_new_data_set_sample_spec(&data, &ss);
+        pa_sink_new_data_set_channel_map(&data, &map);
+
+        if (base->server_name)
+            pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
+        pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
+        pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+        pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
+
+        if (pa_modargs_get_proplist(base->ma, "sink_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
+            pa_log("Invalid properties");
+            pa_sink_new_data_done(&data);
+            goto fail;
+        }
+
+        card->sink = pa_sink_new(base->core, &data, PA_SINK_LATENCY);
+        pa_sink_new_data_done(&data);
+
+        if (!card->sink) {
+            pa_log("Failed to create sink.");
+            goto fail;
+        }
+
+        card->sink->parent.process_msg = pa_process_sink_msg;
+        card->sink->userdata = card;
+
+        pa_sink_set_asyncmsgq(card->sink, card->thread_mq.inq);
+        pa_sink_set_rtpoll(card->sink, card->rtpoll);
+        pa_sink_set_max_request(card->sink,jack_get_buffer_size(card->jack)* pa_frame_size(&card->sink->sample_spec));
+    } else {
+        pa_source_new_data data;
+        data.driver = __FILE__;
+        data.module = base->module;
+        pa_source_new_data_init(&data);
+        pa_source_new_data_set_name(&data, card->name);
+        pa_source_new_data_set_sample_spec(&data, &ss);
+        pa_source_new_data_set_channel_map(&data, &map);
+
+        if (base->server_name)
+            pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, &base->server_name);
+        pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "Jack (%s)", jack_get_client_name(card->jack));
+        pa_proplist_sets(data.proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+        pa_proplist_sets(data.proplist, PA_PROP_DEVICE_API, "jack");
+
+        if (pa_modargs_get_proplist(base->ma, "source_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
+            pa_log("Invalid properties");
+            pa_source_new_data_done(&data);
+            goto fail;
+        }
+
+        card->source = pa_source_new(base->core, &data, PA_SOURCE_LATENCY);
+        pa_source_new_data_done(&data);
+
+        if (!card->source) {
+            pa_log("Failed to create source.");
+            goto fail;
+        }
+        card->source->parent.process_msg = source_process_msg;
+        card->source->userdata = card;
+
+        pa_source_set_asyncmsgq(card->source, card->thread_mq.inq);
+        pa_source_set_rtpoll(card->source, card->rtpoll);
+    }
+
+    /* Jack ports */
+    autoconnect = base->autoconnect;
+    if (autoconnect)
+        ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (sink ? JackPortIsInput : JackPortIsOutput));
+    for (i = 0, p = ports; i < ss.channels; i++, p++) {
+        switch(i){
+            case 0:
+                if (ss.channels == 1) {
+                    if (sink)
+                        port_name = (char *) "out";
+                    else
+                        port_name = (char *) "in";
+                } else {
+                    if (sink)
+                        port_name = (char *) "left";
+                    else
+                        port_name = (char *) "left_in";
+                }
+                break;
+            case 1:
+                if (sink)
+                    port_name = (char*) "right";
+                else
+                    port_name = (char*) "right_in";
+                break;
+            default:
+                port_name = malloc(10);
+                if (sink)
+                    sprintf(port_name, "out_%d", i+1);
+                else
+                    sprintf(port_name, "in_%d", i+1);
+        }
+
+        if (!(port = jack_port_register(card->jack, port_name, JACK_DEFAULT_AUDIO_TYPE, (sink ? JackPortIsOutput : JackPortIsInput)|JackPortIsTerminal, 0))) {
+            pa_log("jack_port_register() failed.");
+            goto fail;
+        }
+
+        if (sink){
+            card->sink_port[i] = port;
+            if (autoconnect){
+                if (!p || !*p) {
+                    pa_log("Not enough physical output ports, leaving unconnected.");
+                    autoconnect = false;
+                }else{
+                    if (jack_connect(card->jack,jack_port_name(card->sink_port[i]),*p)) {
+                        pa_log("Failed to connect %s to %s, leaving unconnected.", jack_port_name(card->sink_port[i]), *p);
+                        autoconnect = false;
+                    }
+                }
+            }
+        } else {
+            card->source_port[i] = port;
+            if (autoconnect){
+                if (!p || !*p) {
+                    pa_log("Not enough physical output ports, leaving unconnected.");
+                    autoconnect = false;
+                }else{
+                    if (jack_connect(card->jack,*p,jack_port_name(card->source_port[i]))) {
+                        pa_log("Failed to connect %s to %s, leaving unconnected.", *p, jack_port_name(card->source_port[i]));
+                        autoconnect = false;
+                    }
+                }
+            }
+        }
+    }
+    if (ports)
+        jack_free(ports);
+
+    if (sink) {
+        pa_sink_set_fixed_latency(card->sink,pa_bytes_to_usec((r.max * pa_frame_size(&card->sink->sample_spec)), &card->sink->sample_spec));
+        pa_sink_put(card->sink);
+    } else {
+        pa_source_set_fixed_latency(card->source,pa_bytes_to_usec((r.max * pa_frame_size(&card->source->sample_spec)), &card->source->sample_spec));
+        pa_source_put(card->source);
+    }
+
+    return NULL;
+
+fail:
+    pa_log("add_bridge fatal error");
+    abort();
+    return NULL;
+
 }
 
 void unload_card(void* arg,bool forced){
@@ -506,7 +565,7 @@ void unload_card(void* arg,bool forced){
 		return;
 	}
 
-	if(card->is_sink){
+	if(card->sink){
 		if (pa_idxset_size(card->sink->inputs) > 0) {
 			pa_sink *def;
 			pa_sink_input *i;
@@ -517,7 +576,9 @@ void unload_card(void* arg,bool forced){
 				pa_sink_input_move_to(i, def, false);
 		}
 		pa_sink_unlink(card->sink);
-	}else{
+        card->sink = NULL;
+	}
+    if (card->source){
 		if (pa_idxset_size(card->source->outputs) > 0) {
 			pa_source *def;
 			pa_source_output *o;
@@ -528,6 +589,7 @@ void unload_card(void* arg,bool forced){
 				pa_source_output_move_to(o, def, false);
 		}
 		pa_source_unlink(card->source);
+        card->source = NULL;
 	}
 	base->core->mainloop->time_free(card->time_event);
 
@@ -536,9 +598,9 @@ void unload_card(void* arg,bool forced){
 	pa_thread_free(card->thread);
 	pa_thread_mq_done(&card->thread_mq);
 
-	if(card->is_sink)
+	if(card->sink)
 		pa_sink_unref(card->sink);
-	else
+	if(card->source)
 		pa_source_unref(card->source);
 
 	pa_rtpoll_item_free(card->rtpoll_item);
@@ -608,20 +670,29 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 		pa_log_info("%s don't own jack-link...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
 	}else{
 		uint32_t idx;
-		struct sCard* card;
+		struct sCard *card, *refCard;
 		const char *merge_ref = get_merge_ref(sink_input->proplist, base);
 
+        card = NULL;
         if (merge_ref)
-            PA_IDXSET_FOREACH(card, base->cards, idx)
-                if (card->merge_ref)
-                    if ((!strcmp(card->merge_ref, merge_ref)) && (card->is_sink)) {
-                        pa_log_info("secend sink from %s...", merge_ref);
-                        pa_sink_input_move_to(sink_input, card->sink, false);
-                        pa_idxset_put(card->inputs, sink_input, NULL);
-                        return PA_HOOK_OK;
+            PA_IDXSET_FOREACH(refCard, base->cards, idx)
+                if (refCard->merge_ref)
+                    if (!strcmp(refCard->merge_ref, merge_ref)) {
+                        if (refCard->sink) {
+                            pa_log_info("secend sink from %s...", merge_ref);
+                            pa_sink_input_move_to(sink_input, refCard->sink, false);
+                            pa_idxset_put(refCard->inputs, sink_input, NULL);
+                            return PA_HOOK_OK;
+                        } else {
+                            card = refCard;
+                            break;
+                        }
                     }
 
-		card = init_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME),true, sink_input->sample_spec.channels);
+        if (!card)
+            card = create_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
+        add_bridge(card,true,sink_input->sample_spec.channels);
+
 		pa_idxset_put(card->inputs, sink_input, NULL);
 		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
         card->merge_ref = malloc(strlen(merge_ref)+1);
@@ -632,6 +703,7 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
 		else
 			pa_log_info("Successfully create sink input %s via %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
 	}
+
 	return PA_HOOK_OK;
 }
 
@@ -644,22 +716,29 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 		pa_log_info("%s don't own jack-link...",pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
 	}else{
 		uint32_t idx;
-		struct sCard* card;
-		char *name;
+		struct sCard *card, *refCard;
 		const char *merge_ref = get_merge_ref(source_output->proplist, base);
 
+        card = NULL;
         if (merge_ref)
-            PA_IDXSET_FOREACH(card, base->cards, idx)
-                if (card->merge_ref)
-                    if ((pa_streq(card->merge_ref,merge_ref)) && (!card->is_sink)){
-                        pa_log_info("secend source from %s...",merge_ref);
-                        pa_source_output_move_to(source_output, card->source, false);
-                        pa_idxset_put(card->outputs, source_output, NULL);
-                        return PA_HOOK_OK;
+            PA_IDXSET_FOREACH(refCard, base->cards, idx)
+                if (refCard->merge_ref)
+                    if (pa_streq(refCard->merge_ref,merge_ref)){
+                        if (refCard->source) {
+                            pa_log_info("secend source from %s...", merge_ref);
+                            pa_source_output_move_to(source_output, refCard->source, false);
+                            pa_idxset_put(refCard->outputs, source_output, NULL);
+                            return PA_HOOK_OK;
+                        } else {
+                            card = refCard;
+                            break;
+                        }
                     }
 
-		name = (char *)pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME);
-		card= init_card(base,strcat(name,"-mic"),false,source_output->sample_spec.channels);
+        if (!card)
+            card = create_card(base,pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
+        add_bridge(card,false,source_output->sample_spec.channels);
+
 		pa_idxset_put(card->outputs, source_output, NULL);
 		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
         card->merge_ref = malloc(strlen(merge_ref)+1);
@@ -670,6 +749,7 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
 		else
 			pa_log_info("Successfully create source input %s via %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
 	}
+
 	return PA_HOOK_OK;
 }
 
@@ -700,10 +780,11 @@ static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval
 
     base->core->mainloop->time_restart(card->time_event, NULL);
 
-	if(card->is_sink){
+	if(card->sink){
 		if (pa_idxset_size(card->sink->inputs) > 0)
 			return;
-	}else{
+	}
+    if(card->source){
 		if (pa_idxset_size(card->source->outputs) > 0)
 			return;
 	}
@@ -765,9 +846,11 @@ int pa__init(pa_module*m) {
 	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL],	PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
 
 	/* fixes the same problems as module-always-sink */
-	card = init_card(base,"Pulse-to-Jack",true,0);
-	pa_namereg_set_default_sink(base->core,card->sink);
-	card = init_card(base,"Jack-to-Pulse",false,0);
+    card = create_card(base,"PulseAudio");
+    add_bridge(card,true,0); // sink
+    add_bridge(card,false,0);// source
+
+    pa_namereg_set_default_sink(base->core,card->sink);
 	pa_namereg_set_default_source(base->core,card->source);
 
 	return 0;
@@ -782,12 +865,6 @@ void pa__done(pa_module*m) {
 
 	if (!(base = m->userdata))
 		return;
-
-	if (base->cards)
-		pa_idxset_free(base->cards, NULL);
-
-	if (base->ma)
-		pa_modargs_free(base->ma);
 
 	if (base->sink_put_slot)
 		pa_hook_slot_free(base->sink_put_slot);
@@ -805,6 +882,11 @@ void pa__done(pa_module*m) {
 	PA_IDXSET_FOREACH(card, base->cards, idx){
         unload_card(card,true);
 	}
+
+    if (base->cards)
+        pa_idxset_free(base->cards, NULL);
+    if (base->ma)
+        pa_modargs_free(base->ma);
 
 	pa_xfree(base);
 }

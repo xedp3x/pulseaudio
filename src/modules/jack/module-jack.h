@@ -25,7 +25,6 @@ struct sBase {
 
 struct sCard {
 	void *base;
-	bool is_sink;
 	char const *name;
     char *merge_ref;
 
@@ -43,14 +42,13 @@ struct sCard {
 	pa_rtpoll *rtpoll;
 
 	jack_client_t *jack;
-	jack_port_t *port[PA_CHANNELS_MAX];
+	jack_port_t *sink_port[PA_CHANNELS_MAX], *source_port[PA_CHANNELS_MAX];
 	jack_nframes_t frames_in_buffer;
 	jack_nframes_t saved_frame_time;
 	bool saved_frame_time_valid;
 
-	unsigned channels;
-	unsigned ports[PA_CHANNELS_MAX];
-	void *buffer[PA_CHANNELS_MAX];
+	unsigned sink_channels, source_channels;
+	void *sink_buffer[PA_CHANNELS_MAX], *source_buffer[PA_CHANNELS_MAX];
 };
 
 
@@ -62,7 +60,8 @@ enum {
 	SINK_MESSAGE_ON_SHUTDOWN
 };
 
-void* init_card(void* arg, const char *name, bool is_sink, uint8_t channels);
+void* create_card(void* arg, const char *name);
+void* add_bridge(void *arg, bool sink, uint8_t channels);
 void unload_card(void* arg,bool forced);
 static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata);
 const char* get_merge_ref(pa_proplist *p, struct sBase *base);
