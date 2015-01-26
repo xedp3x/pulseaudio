@@ -300,7 +300,7 @@ static void jack_shutdown(void* arg) {
 }
 
 void* create_card(void* arg, const char *name){
-    struct sCard *card = malloc(sizeof(struct sCard));
+    struct sCard *card = pa_xnew0(struct sCard,1);
     struct sBase *base = arg;
     jack_status_t status;
 
