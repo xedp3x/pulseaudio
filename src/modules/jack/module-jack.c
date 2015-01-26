@@ -52,149 +52,149 @@ PA_MODULE_DESCRIPTION("JACK");
 PA_MODULE_LOAD_ONCE(true);
 PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_USAGE(
-		"sink_properties=<properties for the card>"
-		"source_properties=<properties for the card>"
-		"server_name=<jack server name>"
-		"connect=<connect new ports to speaker/mic?>"
-		"merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
-		"delay=<delay before remove unused application bridge, 0=never>"
+        "sink_properties=<properties for the card>"
+        "source_properties=<properties for the card>"
+        "server_name=<jack server name>"
+        "connect=<connect new ports to speaker/mic?>"
+        "merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
+        "delay=<delay before remove unused application bridge, 0=never>"
 );
 
 static const char* const valid_modargs[] = {
-	"sink_properties",
-	"source_properties",
-	"server_name",
-	"connect",
-	"merge",
-	"delay",
-	NULL
+    "sink_properties",
+    "source_properties",
+    "server_name",
+    "connect",
+    "merge",
+    "delay",
+    NULL
 };
 
 static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
-	struct sCard *card = PA_SOURCE(o)->userdata;
-	struct sBase *base = card->base;
+    struct sCard *card = PA_SOURCE(o)->userdata;
+    struct sBase *base = card->base;
 
     switch (code) {
-		case SOURCE_MESSAGE_POST:
-			/* Handle the new block from the JACK thread */
-			pa_assert(chunk);
-			pa_assert(chunk->length > 0);
+        case SOURCE_MESSAGE_POST:
+            /* Handle the new block from the JACK thread */
+            pa_assert(chunk);
+            pa_assert(chunk->length > 0);
 
-			if (card->source->thread_info.state == PA_SOURCE_RUNNING)
-				pa_source_post(card->source, chunk);
+            if (card->source->thread_info.state == PA_SOURCE_RUNNING)
+                pa_source_post(card->source, chunk);
 
-			card->saved_frame_time = (jack_nframes_t) offset;
-			card->saved_frame_time_valid = true;
-			return 0;
+            card->saved_frame_time = (jack_nframes_t) offset;
+            card->saved_frame_time_valid = true;
+            return 0;
 
-		case SOURCE_MESSAGE_ON_SHUTDOWN:
-			pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
-			return 0;
+        case SOURCE_MESSAGE_ON_SHUTDOWN:
+            pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            return 0;
 
-		case PA_SOURCE_MESSAGE_GET_LATENCY: {
-			jack_latency_range_t r;
-			jack_nframes_t l, ft, d;
-			size_t n;
+        case PA_SOURCE_MESSAGE_GET_LATENCY: {
+            jack_latency_range_t r;
+            jack_nframes_t l, ft, d;
+            size_t n;
 
-			/* This is the "worst-case" latency */
-			jack_port_get_latency_range(card->source_port[0], JackCaptureLatency, &r);
-			l = r.max;
+            /* This is the "worst-case" latency */
+            jack_port_get_latency_range(card->source_port[0], JackCaptureLatency, &r);
+            l = r.max;
 
-			if (card->saved_frame_time_valid) {
-				/* Adjust the worst case latency by the time that
-				 * passed since we last handed data to JACK */
+            if (card->saved_frame_time_valid) {
+                /* Adjust the worst case latency by the time that
+                 * passed since we last handed data to JACK */
 
-				ft = jack_frame_time(card->jack);
-				d = ft > card->saved_frame_time ? ft - card->saved_frame_time : 0;
-				l += d;
-			}
+                ft = jack_frame_time(card->jack);
+                d = ft > card->saved_frame_time ? ft - card->saved_frame_time : 0;
+                l += d;
+            }
 
-			/* Convert it to usec */
-			n = l * pa_frame_size(&card->source->sample_spec);
-			*((pa_usec_t*) data) = pa_bytes_to_usec(n, &card->source->sample_spec);
-			return 0;
-		}
+            /* Convert it to usec */
+            n = l * pa_frame_size(&card->source->sample_spec);
+            *((pa_usec_t*) data) = pa_bytes_to_usec(n, &card->source->sample_spec);
+            return 0;
+        }
         default:
             return pa_source_process_msg(o, code, data, offset, chunk);
     }
 }
 
 static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *memchunk) {
-	struct sCard *card = PA_SINK(o)->userdata;
-	struct sBase *base = card->base;
+    struct sCard *card = PA_SINK(o)->userdata;
+    struct sBase *base = card->base;
 
-	switch (code) {
-		case SINK_MESSAGE_RENDER:
-			/* Handle the request from the JACK thread */
-			if (card->sink->thread_info.state == PA_SINK_RUNNING) {
-				pa_memchunk chunk;
-				size_t nbytes;
-				void *p;
-				bool rewind_requested;
+    switch (code) {
+        case SINK_MESSAGE_RENDER:
+            /* Handle the request from the JACK thread */
+            if (card->sink->thread_info.state == PA_SINK_RUNNING) {
+                pa_memchunk chunk;
+                size_t nbytes;
+                void *p;
+                bool rewind_requested;
 
-				pa_assert(offset > 0);
-				nbytes = (size_t) offset * pa_frame_size(&card->sink->sample_spec);
+                pa_assert(offset > 0);
+                nbytes = (size_t) offset * pa_frame_size(&card->sink->sample_spec);
 
-				rewind_requested = card->sink->thread_info.rewind_requested;
-				card->sink->thread_info.rewind_requested = false;
-				pa_sink_render_full(card->sink, nbytes, &chunk);
-				card->sink->thread_info.rewind_requested = rewind_requested;
+                rewind_requested = card->sink->thread_info.rewind_requested;
+                card->sink->thread_info.rewind_requested = false;
+                pa_sink_render_full(card->sink, nbytes, &chunk);
+                card->sink->thread_info.rewind_requested = rewind_requested;
 
-				p = pa_memblock_acquire_chunk(&chunk);
-				pa_deinterleave(p, card->sink_buffer, card->sink_channels, sizeof(float),(unsigned) offset);
-				pa_memblock_release(chunk.memblock);
+                p = pa_memblock_acquire_chunk(&chunk);
+                pa_deinterleave(p, card->sink_buffer, card->sink_channels, sizeof(float),(unsigned) offset);
+                pa_memblock_release(chunk.memblock);
 
-				pa_memblock_unref(chunk.memblock);
-			} else {
-				unsigned c;
-				pa_sample_spec ss;
+                pa_memblock_unref(chunk.memblock);
+            } else {
+                unsigned c;
+                pa_sample_spec ss;
 
-				/* Humm, we're not RUNNING, hence let's write some silence */
-				/* This can happen if we're paused, or during shutdown (when we're unlinked but jack is still running). */
+                /* Humm, we're not RUNNING, hence let's write some silence */
+                /* This can happen if we're paused, or during shutdown (when we're unlinked but jack is still running). */
 
-				ss = card->sink->sample_spec;
-				ss.channels = 1;
+                ss = card->sink->sample_spec;
+                ss.channels = 1;
 
-				for (c = 0; c < card->sink_channels; c++)
-					pa_silence_memory(card->sink_buffer[c],(size_t) offset * pa_sample_size(&ss), &ss);
-			}
-			card->frames_in_buffer = (jack_nframes_t) offset;
-			card->saved_frame_time = *(jack_nframes_t*) data;
-			card->saved_frame_time_valid = true;
-			return 0;
+                for (c = 0; c < card->sink_channels; c++)
+                    pa_silence_memory(card->sink_buffer[c],(size_t) offset * pa_sample_size(&ss), &ss);
+            }
+            card->frames_in_buffer = (jack_nframes_t) offset;
+            card->saved_frame_time = *(jack_nframes_t*) data;
+            card->saved_frame_time_valid = true;
+            return 0;
 
-		case SINK_MESSAGE_BUFFER_SIZE:
-			pa_sink_set_max_request_within_thread(card->sink, (size_t) offset * pa_frame_size(&card->sink->sample_spec));
-			return 0;
+        case SINK_MESSAGE_BUFFER_SIZE:
+            pa_sink_set_max_request_within_thread(card->sink, (size_t) offset * pa_frame_size(&card->sink->sample_spec));
+            return 0;
 
-		case SINK_MESSAGE_ON_SHUTDOWN:
-			pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
-			return 0;
+        case SINK_MESSAGE_ON_SHUTDOWN:
+            pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            return 0;
 
-		case PA_SINK_MESSAGE_GET_LATENCY: {
-			jack_nframes_t l, ft, d;
-			jack_latency_range_t r;
-			size_t n;
+        case PA_SINK_MESSAGE_GET_LATENCY: {
+            jack_nframes_t l, ft, d;
+            jack_latency_range_t r;
+            size_t n;
 
-			/* This is the "worst-case" latency */
-			jack_port_get_latency_range(card->sink_port[0], JackPlaybackLatency, &r);
-			l = r.max + card->frames_in_buffer;
+            /* This is the "worst-case" latency */
+            jack_port_get_latency_range(card->sink_port[0], JackPlaybackLatency, &r);
+            l = r.max + card->frames_in_buffer;
 
-			if (card->saved_frame_time_valid) {
-				/* Adjust the worst case latency by the time that
-				 * passed since we last handed data to JACK */
+            if (card->saved_frame_time_valid) {
+                /* Adjust the worst case latency by the time that
+                 * passed since we last handed data to JACK */
 
-				ft = jack_frame_time(card->jack);
-				d = ft > card->saved_frame_time ? ft - card->saved_frame_time : 0;
-				l = l > d ? l - d : 0;
-			}
+                ft = jack_frame_time(card->jack);
+                d = ft > card->saved_frame_time ? ft - card->saved_frame_time : 0;
+                l = l > d ? l - d : 0;
+            }
 
-			/* Convert it to usec */
-			n = l * pa_frame_size(&card->sink->sample_spec);
-			*((pa_usec_t*) data) = pa_bytes_to_usec(n, &card->sink->sample_spec);
+            /* Convert it to usec */
+            n = l * pa_frame_size(&card->sink->sample_spec);
+            *((pa_usec_t*) data) = pa_bytes_to_usec(n, &card->sink->sample_spec);
 
-			return 0;
-		}
+            return 0;
+        }
 
         default:
             return pa_sink_process_msg(o, code, data, offset, memchunk);
@@ -202,101 +202,101 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
 }
 
 static int jack_process(jack_nframes_t nframes, void *arg) {
-	struct sCard *card = arg;
-	struct sBase *base = card->base;
-	unsigned c;
-	void *p;
-	const void *buffer[PA_CHANNELS_MAX];
-	jack_nframes_t frame_time;
-	pa_memchunk chunk;
-	pa_assert(card);
+    struct sCard *card = arg;
+    struct sBase *base = card->base;
+    unsigned c;
+    void *p;
+    const void *buffer[PA_CHANNELS_MAX];
+    jack_nframes_t frame_time;
+    pa_memchunk chunk;
+    pa_assert(card);
 
-	if (card->sink) {
-		for (c = 0; c < card->sink_channels; c++)
-			pa_assert_se(card->sink_buffer[c] = jack_port_get_buffer(card->sink_port[c], nframes));
-		frame_time = jack_frame_time(card->jack);
-		pa_assert_se(pa_asyncmsgq_send(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_RENDER, &frame_time, nframes, NULL) == 0);
-	}
+    if (card->sink) {
+        for (c = 0; c < card->sink_channels; c++)
+            pa_assert_se(card->sink_buffer[c] = jack_port_get_buffer(card->sink_port[c], nframes));
+        frame_time = jack_frame_time(card->jack);
+        pa_assert_se(pa_asyncmsgq_send(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_RENDER, &frame_time, nframes, NULL) == 0);
+    }
     if (card->source) {
-		for (c = 0; c < card->source_channels; c++)
-			pa_assert_se(buffer[c] = jack_port_get_buffer(card->source_port[c], nframes));
+        for (c = 0; c < card->source_channels; c++)
+            pa_assert_se(buffer[c] = jack_port_get_buffer(card->source_port[c], nframes));
 
-		pa_memchunk_reset(&chunk);
-		chunk.length = nframes * pa_frame_size(&card->source->sample_spec);
-		chunk.memblock = pa_memblock_new(base->core->mempool, chunk.length);
-		p = pa_memblock_acquire(chunk.memblock);
-		pa_interleave(buffer, card->source_channels, p, sizeof(float), nframes);
-		pa_memblock_release(chunk.memblock);
-		frame_time = jack_frame_time(card->jack);
-		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source),SOURCE_MESSAGE_POST, NULL, frame_time, &chunk, NULL);
-		pa_memblock_unref(chunk.memblock);
-	}
+        pa_memchunk_reset(&chunk);
+        chunk.length = nframes * pa_frame_size(&card->source->sample_spec);
+        chunk.memblock = pa_memblock_new(base->core->mempool, chunk.length);
+        p = pa_memblock_acquire(chunk.memblock);
+        pa_interleave(buffer, card->source_channels, p, sizeof(float), nframes);
+        pa_memblock_release(chunk.memblock);
+        frame_time = jack_frame_time(card->jack);
+        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source),SOURCE_MESSAGE_POST, NULL, frame_time, &chunk, NULL);
+        pa_memblock_unref(chunk.memblock);
+    }
 
-	return 0;
+    return 0;
 }
 
 static void thread_func(void *arg) {
-	struct sCard *card = arg;
-	struct sBase *base = card->base;
+    struct sCard *card = arg;
+    struct sBase *base = card->base;
 
-	pa_assert(card);
-	pa_log_debug("Thread starting up");
+    pa_assert(card);
+    pa_log_debug("Thread starting up");
 
-	if (base->core->realtime_scheduling)
-		pa_make_realtime(base->core->realtime_priority);
-	pa_thread_mq_install(&card->thread_mq);
+    if (base->core->realtime_scheduling)
+        pa_make_realtime(base->core->realtime_priority);
+    pa_thread_mq_install(&card->thread_mq);
 
-	for (;;) {
-		int ret;
+    for (;;) {
+        int ret;
 
-		if ((ret = pa_rtpoll_run(card->rtpoll)) < 0) {
+        if ((ret = pa_rtpoll_run(card->rtpoll)) < 0) {
             pa_log("fail in thread_func");
             goto fail;
         }
 
-		if (ret == 0)
-			goto finish;
-	}
+        if (ret == 0)
+            goto finish;
+    }
 
-	fail:
-	/* If this was no regular exit from the loop we have to continue
-	 * processing messages until we received PA_MESSAGE_SHUTDOWN */
-	pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
-	pa_asyncmsgq_wait_for(card->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
+    fail:
+    /* If this was no regular exit from the loop we have to continue
+     * processing messages until we received PA_MESSAGE_SHUTDOWN */
+    pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+    pa_asyncmsgq_wait_for(card->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
 
-	finish:
-	pa_log_debug("Thread shutting down");
+    finish:
+    pa_log_debug("Thread shutting down");
 }
 
 static void jack_error_func(const char*t) {
-	char *s;
+    char *s;
 
-	s = pa_xstrndup(t, strcspn(t, "\n\r"));
-	pa_log_warn("JACK error >%s<", s);
-	pa_xfree(s);
+    s = pa_xstrndup(t, strcspn(t, "\n\r"));
+    pa_log_warn("JACK error >%s<", s);
+    pa_xfree(s);
 }
 
 static void jack_init(void *arg) {
-	struct sCard *card = arg;
-	struct sBase *base = card->base;
+    struct sCard *card = arg;
+    struct sBase *base = card->base;
 
-	pa_log_info("JACK thread starting up.");
+    pa_log_info("JACK thread starting up.");
 
-	if (base->core->realtime_scheduling)
-		pa_make_realtime(base->core->realtime_priority + 4);
+    if (base->core->realtime_scheduling)
+        pa_make_realtime(base->core->realtime_priority + 4);
 }
 
 static void jack_shutdown(void* arg) {
-	struct sCard *card = arg;
+    struct sCard *card = arg;
 
-	pa_log_info("JACK thread shutting down..");
+    pa_log_info("JACK thread shutting down..");
 
-	if (card->sink) {
-		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
-	}
+    if (card->sink) {
+        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
+    }
     if (card->source) {
-		pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source), SOURCE_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
-	}
+        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source), SOURCE_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
+    }
 }
 
 void* create_card(void* arg, const char *name){
@@ -555,79 +555,79 @@ fail:
 }
 
 void unload_card(void* arg,bool forced){
-	struct sCard* card = arg;
-	struct sBase* base = card->base;
+    struct sCard* card = arg;
+    struct sBase* base = card->base;
 
-	if (!forced){
-		pa_usec_t now;
-		now = pa_rtclock_now();
+    if (!forced){
+        pa_usec_t now;
+        now = pa_rtclock_now();
         if (base->delay > 0)
-		    pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
-		return;
-	}
+            pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
+        return;
+    }
 
-	if(card->sink){
-		if (pa_idxset_size(card->sink->inputs) > 0) {
-			pa_sink *def;
-			pa_sink_input *i;
-			uint32_t idx;
+    if(card->sink){
+        if (pa_idxset_size(card->sink->inputs) > 0) {
+            pa_sink *def;
+            pa_sink_input *i;
+            uint32_t idx;
 
-			def = pa_namereg_get_default_sink(base->core);
-		    PA_IDXSET_FOREACH(i, card->sink->inputs, idx)
-				pa_sink_input_move_to(i, def, false);
-		}
-		pa_sink_unlink(card->sink);
+            def = pa_namereg_get_default_sink(base->core);
+            PA_IDXSET_FOREACH(i, card->sink->inputs, idx)
+                pa_sink_input_move_to(i, def, false);
+        }
+        pa_sink_unlink(card->sink);
         card->sink = NULL;
-	}
+    }
     if (card->source){
-		if (pa_idxset_size(card->source->outputs) > 0) {
-			pa_source *def;
-			pa_source_output *o;
-			uint32_t idx;
+        if (pa_idxset_size(card->source->outputs) > 0) {
+            pa_source *def;
+            pa_source_output *o;
+            uint32_t idx;
 
-			def = pa_namereg_get_default_source(base->core);
-			PA_IDXSET_FOREACH(o, card->source->outputs, idx)
-				pa_source_output_move_to(o, def, false);
-		}
-		pa_source_unlink(card->source);
+            def = pa_namereg_get_default_source(base->core);
+            PA_IDXSET_FOREACH(o, card->source->outputs, idx)
+                pa_source_output_move_to(o, def, false);
+        }
+        pa_source_unlink(card->source);
         card->source = NULL;
-	}
-	base->core->mainloop->time_free(card->time_event);
+    }
+    base->core->mainloop->time_free(card->time_event);
 
-	jack_client_close(card->jack);
-	pa_asyncmsgq_send(card->thread_mq.inq, NULL, PA_MESSAGE_SHUTDOWN, NULL, 0, NULL);
-	pa_thread_free(card->thread);
-	pa_thread_mq_done(&card->thread_mq);
+    jack_client_close(card->jack);
+    pa_asyncmsgq_send(card->thread_mq.inq, NULL, PA_MESSAGE_SHUTDOWN, NULL, 0, NULL);
+    pa_thread_free(card->thread);
+    pa_thread_mq_done(&card->thread_mq);
 
-	if(card->sink)
-		pa_sink_unref(card->sink);
-	if(card->source)
-		pa_source_unref(card->source);
+    if(card->sink)
+        pa_sink_unref(card->sink);
+    if(card->source)
+        pa_source_unref(card->source);
 
-	pa_rtpoll_item_free(card->rtpoll_item);
-	pa_asyncmsgq_unref(card->jack_msgq);
-	pa_rtpoll_free(card->rtpoll);
+    pa_rtpoll_item_free(card->rtpoll_item);
+    pa_asyncmsgq_unref(card->jack_msgq);
+    pa_rtpoll_free(card->rtpoll);
 
-	if (card->inputs)
-		pa_idxset_free(card->inputs, NULL);
-	if (card->outputs)
-		pa_idxset_free(card->outputs, NULL);
+    if (card->inputs)
+        pa_idxset_free(card->inputs, NULL);
+    if (card->outputs)
+        pa_idxset_free(card->outputs, NULL);
 
-	pa_idxset_remove_by_data(base->cards, card, NULL);
-	pa_xfree(card);
+    pa_idxset_remove_by_data(base->cards, card, NULL);
+    pa_xfree(card);
 }
 
 const char *get_merge_ref(pa_proplist *p, struct sBase *base){
-	switch (base->merge){
-	case 1:
-		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_ID));
-	case 2:
-		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_BINARY));
-	case 3:
-		return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_NAME));
-	default:
-		return NULL;
-	}
+    switch (base->merge){
+    case 1:
+        return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_ID));
+    case 2:
+        return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_PROCESS_BINARY));
+    case 3:
+        return pa_strnull(pa_proplist_gets(p, PA_PROP_APPLICATION_NAME));
+    default:
+        return NULL;
+    }
 }
 
 static pa_hook_result_t sink_input_move_fail_hook_callback(pa_core *c, pa_sink_input *i, void *u) {
@@ -638,12 +638,12 @@ static pa_hook_result_t sink_input_move_fail_hook_callback(pa_core *c, pa_sink_i
     pa_assert(i);
 
     if (c->state == PA_CORE_SHUTDOWN)
-		return PA_HOOK_OK;
+        return PA_HOOK_OK;
 
     if (pa_sink_input_finish_move(i, target, false) < 0)
-		return PA_HOOK_OK;
+        return PA_HOOK_OK;
     else
-		return PA_HOOK_STOP;
+        return PA_HOOK_STOP;
 }
 
 static pa_hook_result_t source_output_move_fail_hook_callback(pa_core *c, pa_source_output *i, void *u) {
@@ -654,12 +654,12 @@ static pa_hook_result_t source_output_move_fail_hook_callback(pa_core *c, pa_sou
     pa_assert(i);
 
     if (c->state == PA_CORE_SHUTDOWN)
-		return PA_HOOK_OK;
+        return PA_HOOK_OK;
 
     if (pa_source_output_finish_move(i, target, false) < 0)
-		return PA_HOOK_OK;
+        return PA_HOOK_OK;
     else
-		return PA_HOOK_STOP;
+        return PA_HOOK_STOP;
 }
 
 static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_input, struct sBase* base) {
@@ -667,12 +667,12 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
     if (c->state != PA_CORE_RUNNING)
         return PA_HOOK_OK;
 
-	if (sink_input->flags & PA_SINK_INPUT_DONT_MOVE ){
-		pa_log_info("%s don't own jack-link...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
-	}else{
-		uint32_t idx;
-		struct sCard *card, *refCard;
-		const char *merge_ref = get_merge_ref(sink_input->proplist, base);
+    if (sink_input->flags & PA_SINK_INPUT_DONT_MOVE ){
+        pa_log_info("%s don't own jack-link...",pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
+    }else{
+        uint32_t idx;
+        struct sCard *card, *refCard;
+        const char *merge_ref = get_merge_ref(sink_input->proplist, base);
 
         card = NULL;
         if (merge_ref)
@@ -694,18 +694,18 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink_input *sink_i
             card = create_card(base,pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME));
         add_bridge(card,true,sink_input->sample_spec.channels);
 
-		pa_idxset_put(card->inputs, sink_input, NULL);
-		pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+        pa_idxset_put(card->inputs, sink_input, NULL);
+        pa_proplist_sets(card->sink->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
         card->merge_ref = malloc(strlen(merge_ref)+1);
         memcpy(card->merge_ref,merge_ref,strlen(merge_ref)+1);
 
-		if (pa_sink_input_move_to(sink_input, card->sink, false) < 0)
-			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
-		else
-			pa_log_info("Successfully create sink input %s via %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
-	}
+        if (pa_sink_input_move_to(sink_input, card->sink, false) < 0)
+            pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
+        else
+            pa_log_info("Successfully create sink input %s via %s.", pa_strnull(pa_proplist_gets(sink_input->proplist, PA_PROP_APPLICATION_NAME)), card->sink->name);
+    }
 
-	return PA_HOOK_OK;
+    return PA_HOOK_OK;
 }
 
 static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *source_output, struct sBase* base) {
@@ -713,12 +713,12 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
     if (c->state != PA_CORE_RUNNING)
         return PA_HOOK_OK;
 
-	if (source_output->flags & PA_SOURCE_OUTPUT_DONT_MOVE ){
-		pa_log_info("%s don't own jack-link...",pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
-	}else{
-		uint32_t idx;
-		struct sCard *card, *refCard;
-		const char *merge_ref = get_merge_ref(source_output->proplist, base);
+    if (source_output->flags & PA_SOURCE_OUTPUT_DONT_MOVE ){
+        pa_log_info("%s don't own jack-link...",pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
+    }else{
+        uint32_t idx;
+        struct sCard *card, *refCard;
+        const char *merge_ref = get_merge_ref(source_output->proplist, base);
 
         card = NULL;
         if (merge_ref)
@@ -740,154 +740,154 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
             card = create_card(base,pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME));
         add_bridge(card,false,source_output->sample_spec.channels);
 
-		pa_idxset_put(card->outputs, source_output, NULL);
-		pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
+        pa_idxset_put(card->outputs, source_output, NULL);
+        pa_proplist_sets(card->source->proplist, PA_PROP_JACK_CLIENT, jack_get_client_name(card->jack));
         card->merge_ref = malloc(strlen(merge_ref)+1);
         memcpy(card->merge_ref,merge_ref,strlen(merge_ref)+1);
 
-		if (pa_source_output_move_to(source_output, card->source, false) < 0)
-			pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
-		else
-			pa_log_info("Successfully create source input %s via %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
-	}
+        if (pa_source_output_move_to(source_output, card->source, false) < 0)
+            pa_log_info("Failed to move sink input \"%s\" to %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
+        else
+            pa_log_info("Successfully create source input %s via %s.", pa_strnull(pa_proplist_gets(source_output->proplist, PA_PROP_APPLICATION_NAME)), card->source->name);
+    }
 
-	return PA_HOOK_OK;
+    return PA_HOOK_OK;
 }
 
 static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink_input *sink_input, struct sBase* base) {
-	if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL){
-		struct sCard* card = sink_input->sink->userdata;
-		pa_idxset_remove_by_data(card->inputs, sink_input, NULL);
-		unload_card(card,false);
-	}
-	return PA_HOOK_OK;
+    if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL){
+        struct sCard* card = sink_input->sink->userdata;
+        pa_idxset_remove_by_data(card->inputs, sink_input, NULL);
+        unload_card(card,false);
+    }
+    return PA_HOOK_OK;
 }
 
 static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output *source_output, struct sBase* base) {
-	if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL){
-		struct sCard* card = source_output->source->userdata;
-		pa_idxset_remove_by_data(card->outputs, source_output, NULL);
-		unload_card(card,false);
-	}
-	return PA_HOOK_OK;
+    if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL){
+        struct sCard* card = source_output->source->userdata;
+        pa_idxset_remove_by_data(card->outputs, source_output, NULL);
+        unload_card(card,false);
+    }
+    return PA_HOOK_OK;
 }
 
 static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
     struct sCard *card = userdata;
-	struct sBase *base = card->base;
+    struct sBase *base = card->base;
 
     pa_assert(card);
     pa_assert(base);
 
     base->core->mainloop->time_restart(card->time_event, NULL);
 
-	if(card->sink){
-		if (pa_idxset_size(card->sink->inputs) > 0)
-			return;
-	}
+    if(card->sink){
+        if (pa_idxset_size(card->sink->inputs) > 0)
+            return;
+    }
     if(card->source){
-		if (pa_idxset_size(card->source->outputs) > 0)
-			return;
-	}
-	unload_card(userdata,true);
+        if (pa_idxset_size(card->source->outputs) > 0)
+            return;
+    }
+    unload_card(userdata,true);
 }
 
 int pa__init(pa_module*m) {
-	/* init base */
-	struct sBase *base = NULL;
-	struct sCard *card;
-	const char *server_name;
-	uint32_t delay = 5;
+    /* init base */
+    struct sBase *base = NULL;
+    struct sCard *card;
+    const char *server_name;
+    uint32_t delay = 5;
 
-	m->userdata = base = pa_xnew0(struct sBase, 1);
-	base->core = m->core;
-	base->module = m;
-	base->cards = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+    m->userdata = base = pa_xnew0(struct sBase, 1);
+    base->core = m->core;
+    base->module = m;
+    base->cards = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
-	/* read Config */
-	if (!(base->ma = pa_modargs_new(m->argument, valid_modargs))) {
-		pa_log("Failed to parse module arguments.");
-		pa__done(m);
-		return -1;
-	}
+    /* read Config */
+    if (!(base->ma = pa_modargs_new(m->argument, valid_modargs))) {
+        pa_log("Failed to parse module arguments.");
+        pa__done(m);
+        return -1;
+    }
 
-	base->autoconnect = true;
-	if (pa_modargs_get_value_boolean(base->ma, "connect", &(base->autoconnect)) < 0) {
-		pa_log("Failed to parse connect= argument.");
-		pa__done(m);
-		return -1;
-	}
+    base->autoconnect = true;
+    if (pa_modargs_get_value_boolean(base->ma, "connect", &(base->autoconnect)) < 0) {
+        pa_log("Failed to parse connect= argument.");
+        pa__done(m);
+        return -1;
+    }
 
-	base->merge = 1;
-	if (pa_modargs_get_value_u32(base->ma, "merge", &(base->merge)) < 0) {
-		pa_log("Failed to parse merge value.");
-		pa__done(m);
-		return -1;
-	}
+    base->merge = 1;
+    if (pa_modargs_get_value_u32(base->ma, "merge", &(base->merge)) < 0) {
+        pa_log("Failed to parse merge value.");
+        pa__done(m);
+        return -1;
+    }
 
-	if (pa_modargs_get_value_u32(base->ma, "delay", &delay) < 0) {
-		pa_log("Failed to parse delay value. It must be a number > 0 (in sec.).");
-		pa__done(m);
-		return -1;
+    if (pa_modargs_get_value_u32(base->ma, "delay", &delay) < 0) {
+        pa_log("Failed to parse delay value. It must be a number > 0 (in sec.).");
+        pa__done(m);
+        return -1;
     }
     base->delay = delay * PA_USEC_PER_SEC;
 
-	/* init Jack */
-	server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
-	if (server_name)
-		base->server_name = *server_name;
-	jack_set_error_function(jack_error_func);
+    /* init Jack */
+    server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
+    if (server_name)
+        base->server_name = *server_name;
+    jack_set_error_function(jack_error_func);
 
-	/* register hooks */
-	base->sink_put_slot					= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_PUT],				PA_HOOK_LATE+30, (pa_hook_cb_t) sink_put_hook_callback, base);
-	base->sink_unlink_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_UNLINK],			PA_HOOK_LATE+30, (pa_hook_cb_t) sink_unlink_hook_callback, base);
-	base->source_put_slot				= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_PUT],			PA_HOOK_LATE+30, (pa_hook_cb_t) source_put_hook_callback, base);
-	base->source_unlink_slot			= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_UNLINK],		PA_HOOK_LATE+30, (pa_hook_cb_t) source_unlink_hook_callback, base);
-	base->sink_input_move_fail_slot		= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL],		PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
-	base->source_output_move_fail_slot	= pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL],	PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
+    /* register hooks */
+    base->sink_put_slot                = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_PUT],          PA_HOOK_LATE+30, (pa_hook_cb_t) sink_put_hook_callback, base);
+    base->sink_unlink_slot             = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_UNLINK],       PA_HOOK_LATE+30, (pa_hook_cb_t) sink_unlink_hook_callback, base);
+    base->source_put_slot              = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_PUT],       PA_HOOK_LATE+30, (pa_hook_cb_t) source_put_hook_callback, base);
+    base->source_unlink_slot           = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_UNLINK],    PA_HOOK_LATE+30, (pa_hook_cb_t) source_unlink_hook_callback, base);
+    base->sink_input_move_fail_slot    = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FAIL],    PA_HOOK_LATE+20, (pa_hook_cb_t) sink_input_move_fail_hook_callback, base);
+    base->source_output_move_fail_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_MOVE_FAIL], PA_HOOK_LATE+20, (pa_hook_cb_t) source_output_move_fail_hook_callback, base);
 
-	/* fixes the same problems as module-always-sink */
+    /* fixes the same problems as module-always-sink */
     card = create_card(base,"PulseAudio");
     add_bridge(card,true,0); // sink
     add_bridge(card,false,0);// source
 
     pa_namereg_set_default_sink(base->core,card->sink);
-	pa_namereg_set_default_source(base->core,card->source);
+    pa_namereg_set_default_source(base->core,card->source);
 
-	return 0;
+    return 0;
 }
 
 void pa__done(pa_module*m) {
-	struct sBase *base;
+    struct sBase *base;
     struct sCard *card;
-	uint32_t idx;
+    uint32_t idx;
 
-	pa_assert(m);
+    pa_assert(m);
 
-	if (!(base = m->userdata))
-		return;
+    if (!(base = m->userdata))
+        return;
 
-	if (base->sink_put_slot)
-		pa_hook_slot_free(base->sink_put_slot);
-	if (base->sink_unlink_slot)
-		pa_hook_slot_free(base->sink_unlink_slot);
-	if (base->source_put_slot)
-		pa_hook_slot_free(base->source_put_slot);
-	if (base->source_unlink_slot)
-		pa_hook_slot_free(base->source_unlink_slot);
-	if (base->sink_input_move_fail_slot)
-		pa_hook_slot_free(base->sink_input_move_fail_slot);
-	if (base->source_output_move_fail_slot)
-		pa_hook_slot_free(base->source_output_move_fail_slot);
+    if (base->sink_put_slot)
+        pa_hook_slot_free(base->sink_put_slot);
+    if (base->sink_unlink_slot)
+        pa_hook_slot_free(base->sink_unlink_slot);
+    if (base->source_put_slot)
+        pa_hook_slot_free(base->source_put_slot);
+    if (base->source_unlink_slot)
+        pa_hook_slot_free(base->source_unlink_slot);
+    if (base->sink_input_move_fail_slot)
+        pa_hook_slot_free(base->sink_input_move_fail_slot);
+    if (base->source_output_move_fail_slot)
+        pa_hook_slot_free(base->source_output_move_fail_slot);
 
-	PA_IDXSET_FOREACH(card, base->cards, idx){
+    PA_IDXSET_FOREACH(card, base->cards, idx){
         unload_card(card,true);
-	}
+    }
 
     if (base->cards)
         pa_idxset_free(base->cards, NULL);
     if (base->ma)
         pa_modargs_free(base->ma);
 
-	pa_xfree(base);
+    pa_xfree(base);
 }
