@@ -57,7 +57,7 @@ PA_MODULE_USAGE(
 		"server_name=<jack server name>"
 		"connect=<connect new ports to speaker/mic?>"
 		"merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
-		"delay=<delay before remove unused application bridge>"
+		"delay=<delay before remove unused application bridge, 0=never>"
 );
 
 static const char* const valid_modargs[] = {
@@ -330,7 +330,7 @@ void* create_card(void* arg, const char *name){
     pa_log_info("Successfully connected as '%s'", jack_get_client_name(card->jack));
 
     jack_set_process_callback(card->jack, jack_process, card);
-    jack_on_shutdown(card->jack, jack_shutdown, &card);
+    jack_on_shutdown(card->jack, jack_shutdown, card);
     jack_set_thread_init_callback(card->jack, jack_init, card);
 
     if (jack_activate(card->jack)) {
@@ -561,7 +561,8 @@ void unload_card(void* arg,bool forced){
 	if (!forced){
 		pa_usec_t now;
 		now = pa_rtclock_now();
-		pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
+        if (base->delay > 0)
+		    pa_core_rttime_restart(base->core, card->time_event, now + base->delay);
 		return;
 	}
 
