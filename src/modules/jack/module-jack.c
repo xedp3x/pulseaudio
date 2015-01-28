@@ -88,7 +88,9 @@ static int source_process_msg(pa_msgobject *o, int code, void *data, int64_t off
             return 0;
 
         case SOURCE_MESSAGE_ON_SHUTDOWN:
-            pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            if (!base->unloading)
+                pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            base->unloading = true;
             return 0;
 
         case PA_SOURCE_MESSAGE_GET_LATENCY: {
@@ -126,7 +128,7 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
     switch (code) {
         case SINK_MESSAGE_RENDER:
             /* Handle the request from the JACK thread */
-            if (card->sink->thread_info.state == PA_SINK_RUNNING) {
+            if ((card->sink->thread_info.state == PA_SINK_RUNNING) & (!base->stoped)) {
                 pa_memchunk chunk;
                 size_t nbytes;
                 void *p;
@@ -168,7 +170,9 @@ static int pa_process_sink_msg(pa_msgobject *o, int code, void *data, int64_t of
             return 0;
 
         case SINK_MESSAGE_ON_SHUTDOWN:
-            pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            if (!base->unloading)
+                pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+            base->unloading = true;
             return 0;
 
         case PA_SINK_MESSAGE_GET_LATENCY: {
@@ -261,7 +265,9 @@ static void thread_func(void *arg) {
     fail:
     /* If this was no regular exit from the loop we have to continue
      * processing messages until we received PA_MESSAGE_SHUTDOWN */
-    pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+    if (!base->unloading)
+        pa_asyncmsgq_post(card->thread_mq.outq, PA_MSGOBJECT(base->core), PA_CORE_MESSAGE_UNLOAD_MODULE, base->module, 0, NULL, NULL);
+    base->unloading = true;
     pa_asyncmsgq_wait_for(card->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
 
     finish:
@@ -288,21 +294,65 @@ static void jack_init(void *arg) {
 
 static void jack_shutdown(void* arg) {
     struct sCard *card = arg;
+    struct sBase *base = card->base;
+    pa_usec_t now;
+    uint32_t idx;
+    now = pa_rtclock_now();
 
     pa_log_info("JACK thread shutting down..");
 
-    if (card->sink) {
-        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
+    base->stoped = true;
+    PA_IDXSET_FOREACH(card, base->cards, idx){
+        card->jack = NULL;
     }
-    if (card->source) {
-        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->source), SOURCE_MESSAGE_ON_SHUTDOWN, NULL, 0, NULL, NULL);
+    // Try to recover in 1 second
+    pa_core_rttime_restart(base->core, base->recover_event, now + PA_USEC_PER_SEC);
+}
+
+bool create_jack(void *arg, bool force) {
+    struct sCard *card = arg;
+    struct sBase *base = card->base;
+
+    jack_status_t status;
+
+    if (!card->jack){
+        if (!(card->jack = jack_client_open(card->name, ((base->server_name ? JackServerName : JackNullOption) |  (force ? JackNullOption : JackNoStartServer)), &status, base->server_name))) {
+            pa_log("jack_client_open() failed.");
+            if (force)
+                goto fail;
+            return false;
+        }
+        pa_log_info("Successfully connected as '%s'", jack_get_client_name(card->jack));
+
+        jack_set_process_callback(card->jack, jack_process, card);
+        jack_on_shutdown(card->jack, jack_shutdown, card);
+        jack_set_thread_init_callback(card->jack, jack_init, card);
+
+        if (jack_activate(card->jack)) {
+            pa_log("jack_activate() failed");
+            goto fail;
+        }
+
+        if (card->sink){
+            pa_log_info("Add Sink for recoverd card %s", card->name);
+            add_bridge(card, true, card->sink_channels);
+        }
+        if (card->source){
+            pa_log_info("Add Source for recoverd card %s", card->name);
+            add_bridge(card, false, card->source_channels);
+        }
     }
+
+    return true;
+fail:
+    pa_log("create_jack fatal error");
+    abort();
+    return false;
 }
 
 void* create_card(void* arg, const char *name){
     struct sCard *card = pa_xnew0(struct sCard,1);
     struct sBase *base = arg;
-    jack_status_t status;
 
     card->merge_ref = NULL;
     card->sink = NULL;
@@ -323,20 +373,8 @@ void* create_card(void* arg, const char *name){
     /* Jack handler */
     card->jack_msgq = pa_asyncmsgq_new(0);
     card->rtpoll_item = pa_rtpoll_item_new_asyncmsgq_read(card->rtpoll, PA_RTPOLL_EARLY - 1, card->jack_msgq);
-    if (!(card->jack = jack_client_open(card->name, base->server_name ? JackServerName : JackNullOption, &status, base->server_name))) {
-        pa_log("jack_client_open() failed.");
-        goto fail;
-    }
-    pa_log_info("Successfully connected as '%s'", jack_get_client_name(card->jack));
 
-    jack_set_process_callback(card->jack, jack_process, card);
-    jack_on_shutdown(card->jack, jack_shutdown, card);
-    jack_set_thread_init_callback(card->jack, jack_init, card);
-
-    if (jack_activate(card->jack)) {
-        pa_log("jack_activate() failed");
-        goto fail;
-    }
+    create_jack(card,true);
 
     if (!(card->thread = pa_thread_new(jack_get_client_name(card->jack),thread_func, card))) {
         pa_log("Failed to create thread.");
@@ -366,13 +404,11 @@ void* add_bridge(void *arg, bool sink, uint8_t channels) {
 
     if (sink){
         if (card->sink) {
-            pa_log("This card have already a sink!");
-            return NULL;
+            goto jack;
         }
     } else {
         if (card->source){
-            pa_log("This card have already a source!");
-            return NULL;
+            goto jack;
         }
     }
 
@@ -380,7 +416,7 @@ void* add_bridge(void *arg, bool sink, uint8_t channels) {
     ss.rate = jack_get_sample_rate(card->jack);
     ss.format = PA_SAMPLE_FLOAT32NE;
     if (channels == 0)
-        ss.channels = base->core->default_sample_spec.channels;
+        channels = ss.channels = base->core->default_sample_spec.channels;
     else
         ss.channels = channels;
 
@@ -433,6 +469,8 @@ void* add_bridge(void *arg, bool sink, uint8_t channels) {
         pa_sink_set_asyncmsgq(card->sink, card->thread_mq.inq);
         pa_sink_set_rtpoll(card->sink, card->rtpoll);
         pa_sink_set_max_request(card->sink,jack_get_buffer_size(card->jack)* pa_frame_size(&card->sink->sample_spec));
+        pa_sink_set_fixed_latency(card->sink,pa_bytes_to_usec((r.max * pa_frame_size(&card->sink->sample_spec)), &card->sink->sample_spec));
+        pa_sink_put(card->sink);
     } else {
         pa_source_new_data data;
         data.driver = __FILE__;
@@ -466,16 +504,23 @@ void* add_bridge(void *arg, bool sink, uint8_t channels) {
 
         pa_source_set_asyncmsgq(card->source, card->thread_mq.inq);
         pa_source_set_rtpoll(card->source, card->rtpoll);
+        pa_source_set_fixed_latency(card->source,pa_bytes_to_usec((r.max * pa_frame_size(&card->source->sample_spec)), &card->source->sample_spec));
+        pa_source_put(card->source);
     }
 
+jack:
+    if (!card->jack){
+        pa_log("Jack are not running! Skip new bridge %s and wait for recovery.",card->name);
+        return NULL;
+    }
     /* Jack ports */
     autoconnect = base->autoconnect;
     if (autoconnect)
         ports = jack_get_ports(card->jack, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | (sink ? JackPortIsInput : JackPortIsOutput));
-    for (i = 0, p = ports; i < ss.channels; i++, p++) {
+    for (i = 0, p = ports; i < channels; i++, p++) {
         switch(i){
             case 0:
-                if (ss.channels == 1) {
+                if (channels == 1) {
                     if (sink)
                         port_name = (char *) "out";
                     else
@@ -537,19 +582,10 @@ void* add_bridge(void *arg, bool sink, uint8_t channels) {
     if (ports)
         jack_free(ports);
 
-    if (sink) {
-        pa_sink_set_fixed_latency(card->sink,pa_bytes_to_usec((r.max * pa_frame_size(&card->sink->sample_spec)), &card->sink->sample_spec));
-        pa_sink_put(card->sink);
-    } else {
-        pa_source_set_fixed_latency(card->source,pa_bytes_to_usec((r.max * pa_frame_size(&card->source->sample_spec)), &card->source->sample_spec));
-        pa_source_put(card->source);
-    }
-
     return NULL;
 
 fail:
     pa_log("add_bridge fatal error");
-    abort();
     return NULL;
 
 }
@@ -772,6 +808,29 @@ static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output
     return PA_HOOK_OK;
 }
 
+static void recover_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
+    struct sBase *base = userdata;
+    struct sCard *card;
+    uint32_t idx;
+
+    pa_assert(base);
+    base->core->mainloop->time_restart(base->recover_event, NULL);
+    if (!base->stoped)
+        return;
+    PA_IDXSET_FOREACH(card, base->cards, idx){
+        if (!create_jack(card, false)){
+            pa_usec_t now;
+            now = pa_rtclock_now();
+            pa_log("recover faild.");// try again in 5 seconds
+            pa_core_rttime_restart(base->core, base->recover_event, now + (5 * PA_USEC_PER_SEC));
+            return;
+        }
+    }
+    pa_log_info("Jack recovery success");
+    base->stoped = false;
+}
+
+
 static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
     struct sCard *card = userdata;
     struct sBase *base = card->base;
@@ -800,9 +859,12 @@ int pa__init(pa_module*m) {
     uint32_t delay = 5;
 
     m->userdata = base = pa_xnew0(struct sBase, 1);
+    base->stoped = false;
+    base->unloading = false;
     base->core = m->core;
     base->module = m;
     base->cards = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+    base->recover_event = pa_core_rttime_new(base->core, PA_USEC_INVALID, recover_cb, base);
 
     /* read Config */
     if (!(base->ma = pa_modargs_new(m->argument, valid_modargs))) {
@@ -866,6 +928,9 @@ void pa__done(pa_module*m) {
 
     if (!(base = m->userdata))
         return;
+
+    if (base->recover_event)
+        base->core->mainloop->time_free(base->recover_event);
 
     if (base->sink_put_slot)
         pa_hook_slot_free(base->sink_put_slot);

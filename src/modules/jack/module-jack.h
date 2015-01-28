@@ -8,6 +8,8 @@ struct sBase {
     pa_modargs *ma;
 
     bool autoconnect;
+    bool stoped, unloading;
+    pa_time_event *recover_event;
     char server_name;
     uint32_t merge;
     pa_usec_t delay;
@@ -61,6 +63,7 @@ enum {
 };
 
 void* create_card(void* arg, const char *name);
+bool create_jack(void *arg, bool force);
 void* add_bridge(void *arg, bool sink, uint8_t channels);
 void unload_card(void* arg,bool forced);
 static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata);
