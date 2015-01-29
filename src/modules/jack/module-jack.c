@@ -57,6 +57,7 @@ PA_MODULE_USAGE(
         "connect=<connect new ports to speaker/mic?>"
         "merge=<merge streams from same application: 0=no, 1=same pid, 2=same binary name, 3=same application name>"
         "delay=<delay before remove unused application bridge, 0=never>"
+        "prepare=<prepare bridge for already existing in/outputs?>"
 );
 
 static const char *const valid_modargs[] = {
@@ -66,6 +67,7 @@ static const char *const valid_modargs[] = {
         "connect",
         "merge",
         "delay",
+        "prepare",
         NULL
 };
 
@@ -305,13 +307,15 @@ static int jack_process(jack_nframes_t nframes, void *arg) {
 
     if (card->sink) {
         for (c = 0; c < card->sink_channels; c++)
-            pa_assert_se(card->sink_buffer[c] = jack_port_get_buffer(card->sink_port[c], nframes));
+            if (card->sink_port[c])
+                pa_assert_se(card->sink_buffer[c] = jack_port_get_buffer(card->sink_port[c], nframes));
         frame_time = jack_frame_time(card->jack);
         pa_assert_se(pa_asyncmsgq_send(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_RENDER, &frame_time, nframes, NULL) == 0);
     }
     if (card->source) {
         for (c = 0; c < card->source_channels; c++)
-            pa_assert_se(buffer[c] = jack_port_get_buffer(card->source_port[c], nframes));
+            if (card->source_port[c])
+                pa_assert_se(buffer[c] = jack_port_get_buffer(card->source_port[c], nframes));
 
         pa_memchunk_reset(&chunk);
         chunk.length = nframes * pa_frame_size(&card->source->sample_spec);
@@ -920,6 +924,7 @@ int pa__init(pa_module*m) {
     struct sBase *base = NULL;
     struct sCard *card;
     const char *server_name;
+    bool prepare;
     uint32_t delay = 5;
 
     /* init base */
@@ -959,6 +964,13 @@ int pa__init(pa_module*m) {
     }
     base->delay = delay * PA_USEC_PER_SEC;
 
+    prepare = true;
+    if (pa_modargs_get_value_boolean(base->ma, "prepare", &prepare) < 0) {
+        pa_log("Failed to parse prepare= argument.");
+        pa__done(m);
+        return -1;
+    }
+
     server_name = pa_modargs_get_value(base->ma, "server_name", NULL);
     if (server_name)
         base->server_name = *server_name;
@@ -980,6 +992,19 @@ int pa__init(pa_module*m) {
     pa_namereg_set_default_sink(base->core, card->sink);
     pa_namereg_set_default_source(base->core, card->source);
 
+    /* load bridges for existing in/outputs */
+    if (prepare) {
+        uint32_t idx;
+        pa_sink_input *si;
+        pa_source_output *so;
+
+        PA_IDXSET_FOREACH(si, base->core->sink_inputs, idx) {
+            sink_put_hook_callback(base->core, si, base);
+        }
+        PA_IDXSET_FOREACH(so, base->core->source_outputs, idx) {
+            source_put_hook_callback(base->core, so, base);
+        }
+    }
     return 0;
 }
 void pa__done(pa_module*m) {
