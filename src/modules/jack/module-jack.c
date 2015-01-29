@@ -866,18 +866,26 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source_output *s
     return PA_HOOK_OK;
 }
 static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink_input *sink_input, struct sBase *base) {
-    if (pa_proplist_gets(sink_input->sink->proplist, PA_PROP_JACK_CLIENT) != NULL){
-        struct sCard *card = sink_input->sink->userdata;
-        pa_idxset_remove_by_data(card->inputs, sink_input, NULL);
-        unload_card(card, false);
+    struct sCard *card;
+    uint32_t idx;
+
+    PA_IDXSET_FOREACH(card, base->cards, idx){
+        if (pa_idxset_remove_by_data(card->inputs, sink_input, NULL)){
+            unload_card(card, false);
+            return PA_HOOK_OK;
+        }
     }
     return PA_HOOK_OK;
 }
 static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source_output *source_output, struct sBase *base) {
-    if (pa_proplist_gets(source_output->source->proplist, PA_PROP_JACK_CLIENT) != NULL){
-        struct sCard *card = source_output->source->userdata;
-        pa_idxset_remove_by_data(card->outputs, source_output, NULL);
-        unload_card(card, false);
+    struct sCard *card;
+    uint32_t idx;
+
+    PA_IDXSET_FOREACH(card, base->cards, idx){
+        if(pa_idxset_remove_by_data(card->outputs, source_output, NULL)){
+            unload_card(card, false);
+            return PA_HOOK_OK;
+        }
     }
     return PA_HOOK_OK;
 }
