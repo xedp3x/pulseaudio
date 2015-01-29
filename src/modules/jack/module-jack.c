@@ -98,6 +98,9 @@ struct sBase {
     uint32_t merge;
     pa_usec_t delay;
 
+    pa_sink *default_sink;
+    pa_source *default_source;
+
     pa_hook_slot
             *sink_put_slot,
             *sink_unlink_slot,
@@ -997,6 +1000,9 @@ int pa__init(pa_module*m) {
     add_bridge(card, is_sink, 0);
     add_bridge(card, is_source, 0);
 
+    base->default_sink = pa_namereg_get_default_sink(card->base->core);
+    base->default_source = pa_namereg_get_default_source(card->base->core);
+
     pa_namereg_set_default_sink(base->core, card->sink);
     pa_namereg_set_default_source(base->core, card->source);
 
@@ -1040,6 +1046,9 @@ void pa__done(pa_module*m) {
         pa_hook_slot_free(base->sink_input_move_fail_slot);
     if (base->source_output_move_fail_slot)
         pa_hook_slot_free(base->source_output_move_fail_slot);
+
+    pa_namereg_set_default_sink(base->core, base->default_sink);
+    pa_namereg_set_default_source(base->core, base->default_source);
 
     PA_IDXSET_FOREACH(card, base->cards, idx){
         unload_card(card, true);
