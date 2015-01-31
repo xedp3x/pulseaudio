@@ -402,6 +402,14 @@ static void jack_shutdown(void *arg) {
     // Try to recover in 1 second
     pa_core_rttime_restart(card->base->core, card->base->recover_event, now + PA_USEC_PER_SEC);
 }
+static int jack_buffer_size(jack_nframes_t nframes, void *arg) {
+    struct sCard *card = arg;
+
+    pa_log_info("JACK buffer size changed.");
+    if (card->sink)
+        pa_asyncmsgq_post(card->jack_msgq, PA_MSGOBJECT(card->sink), SINK_MESSAGE_BUFFER_SIZE, NULL, nframes, NULL, NULL);
+    return 0;
+}
 
 bool create_jack(struct sCard *card, bool force) {
     jack_status_t status;
@@ -419,6 +427,7 @@ bool create_jack(struct sCard *card, bool force) {
         jack_set_process_callback(card->jack, jack_process, card);
         jack_on_shutdown(card->jack, jack_shutdown, card);
         jack_set_thread_init_callback(card->jack, jack_init, card);
+        jack_set_buffer_size_callback(card->jack, jack_buffer_size, card);
 
         if (jack_activate(card->jack)) {
             pa_log("jack_activate() failed");
@@ -1020,6 +1029,23 @@ int pa__init(pa_module*m) {
         }
     }
     return 0;
+}
+int pa__get_n_used(pa_module *m) {
+    struct sBase *base;
+    struct sCard *card;
+    uint32_t idx;
+    int used = 0;
+
+    pa_assert(m);
+    pa_assert_se(base = m->userdata);
+
+    PA_IDXSET_FOREACH(card, base->cards, idx){
+        if (card->sink)
+            used += pa_sink_linked_by(card->sink);
+        if (card->source)
+            used += pa_source_linked_by(card->source);
+    }
+    return used;
 }
 void pa__done(pa_module*m) {
     struct sBase *base;
